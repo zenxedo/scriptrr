@@ -1,21 +1,24 @@
 # scriptrr
 
-**One place for the scripts you already run.** Drop a script in and it lives
-here — listed, readable, runnable on demand. Add a schedule when you want one.
-Give it a lifecycle when it's a standing intention. Nothing is required.
+**One place for the scripts you already run.**
 
-**The loop it owns:** `declare why → run → observe → notify → act → close`
+Drop a script in and it lives here — listed, readable, runnable on demand. Add a
+schedule when you want one. Give it a lifecycle when it's a standing intention.
+Nothing is required.
 
-Every recurring job is that loop. Today the pieces live in different tools and
-*you* are the glue: cron runs it, a heartbeat service watches it, an alert
-channel pings you, a note remembers why. scriptrr holds the whole loop as one
-contained object — so you can see what a job is *for*, when it *runs*, whether
-it's *alive*, what it *last said*, and when it *ends*.
+![scriptrr dashboard](docs/img/dashboard.png)
 
-## Principles
+Every recurring job follows one loop: **declare why → run → observe → notify →
+act → close**. Today those pieces live in different tools and *you* are the glue:
+cron runs it, a heartbeat service watches it, an alert channel pings you, a note
+remembers why. scriptrr holds the whole loop as one contained object — so you can
+see what a job is *for*, when it *runs*, whether it's *alive*, what it *last
+said*, and when it *ends*.
 
-- **Everything is opt-in.** A script with no schedule, no state, no alerts is
-  not incomplete. It is a first-class citizen.
+## Why
+
+- **Everything is opt-in.** A script with no schedule, no state, no alerts is not
+  incomplete. It is a first-class citizen.
 - **Your scripts stay yours.** Plain files, self-contained, runnable outside
   scriptrr. It holds intent — never a cage.
 - **One loop, done well.** No executors, no orchestration. The job owns its
@@ -25,46 +28,21 @@ it's *alive*, what it *last said*, and when it *ends*.
 
 ## Features
 
-- List, edit, run, stop, and delete `.py` / `.sh` scripts from a web dashboard.
-- Per-script **cron scheduling** (APScheduler), with a human-readable next run.
-- **Live output** while a script runs, plus a per-run **log** view.
-- Descriptions, tags, starring, search, and sortable columns.
-- Upload an existing script or create one in the browser.
+- **List & run** any `.py` / `.sh` script from a clean web dashboard.
+- **Live output** while a run is in progress, plus a per-run **log** view.
+- **Cron scheduling** per script, with a human-readable next-run time.
+- **Edit in place** — view and change a script's source straight from the UI.
 
-## Tiers
+  ![edit script](docs/img/edit-script.png)
 
-Each tier is additive. You never *have* to climb.
+- **Arguments** per script, with saved defaults used by scheduled runs.
 
-| Tier | What you add | What you get |
-|---|---|---|
-| 0 | nothing | the script is kept, listed, runnable on demand |
-| 1 | a schedule | it runs on a cron cadence |
-| 2 | state + alert + expiry | a self-retiring nudge |
-| 3 | judgment (optional) | a job that needs reasoning, not just a check |
+  ![script arguments](docs/img/arguments.png)
 
-## A self-retiring nudge
-
-A nudge is a standing intention: *"I already decided to act when X happens; ping
-me when X happens, then stop."* The job owns the whole loop and closes itself
-out — no human bookkeeping, no zombie cron that nags forever.
-
-```python
-EXPIRES = "2026-10-27"          # hard fallback; "" disables
-# ...
-if state.get("done"):           # terminal condition already met
-    retire("already done")      # no-op + best-effort unschedule
-if EXPIRES and today() > EXPIRES:
-    retire("expired")
-
-# ...do the check...
-if condition_met:
-    notify(title, message)      # the actionable ping
-    retire("condition met")     # alert once, then disappear
-```
-
-The state file is the job's memory; `done` and `EXPIRES` are its off-switch.
-Under scriptrr the job unschedules itself; under plain cron the same script
-just no-ops after expiry, so it stays portable.
+- **Descriptions, tags, starring, search**, and sortable columns.
+- **Upload** an existing script or **create** one in the browser.
+- **Tiers**: start with nothing; add a schedule, then state, then judgment — each
+  additive, never required.
 
 ## Quick start
 
@@ -76,15 +54,18 @@ docker run -d \
   zenxedo/scriptrr:latest
 ```
 
-Then open <http://localhost:8000/>. Anything you mount at `/app/scripts` is
-listed. The container writes `scriptrr.db` and `logs/` under `/app`; mount
-those too if you want them to survive a container rebuild:
+Open <http://localhost:8000/>. Anything you mount at `/app/scripts` shows up in
+the dashboard. To keep metadata and logs across container rebuilds, mount those
+too:
 
 ```sh
   -v "$PWD/scripts:/app/scripts" \
   -v "$PWD/data/scriptrr.db:/app/scriptrr.db" \
   -v "$PWD/data/logs:/app/logs" \
 ```
+
+> **Running as non-root.** The image runs as uid `1000`, so the host files you
+> mount must be writable by that user — e.g. `chown -R 1000:1000 ./data`.
 
 ### Docker Compose
 
@@ -96,7 +77,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Mount your scripts — anything you put here shows up in the dashboard.
+      # Mount your scripts — anything here shows up in the dashboard.
       - ./scripts:/app/scripts
       # Optional: persist metadata (schedules/tags) and run logs.
       - ./data/scriptrr.db:/app/scriptrr.db
@@ -124,20 +105,44 @@ USER scriptrr
 - A run's stdout/stderr is written to `logs/<script>.log`; the previous log is
   archived first.
 - Scheduled runs use each script's saved **default arguments**.
-- Scripts are self-contained: they carry their own config and run the same
-  under scriptrr, cron, or an interactive shell.
+- Scripts are self-contained: they carry their own config and run the same under
+  scriptrr, cron, or an interactive shell.
+
+### A self-retiring nudge
+
+A *nudge* is a standing intention: *"I already decided to act when X happens;
+ping me when X happens, then stop."* The job owns the whole loop and closes
+itself out — no zombie cron that nags forever.
+
+```python
+EXPIRES = "2026-10-27"          # hard fallback; "" disables
+# ...
+if state.get("done"):           # terminal condition already met
+    retire("already done")      # no-op + best-effort unschedule
+if EXPIRES and today() > EXPIRES:
+    retire("expired")
+
+# ...do the check...
+if condition_met:
+    notify(title, message)      # the actionable ping
+    retire("condition met")     # alert once, then disappear
+```
+
+The state file is the job's memory; `done` and `EXPIRES` are its off-switch.
+Under scriptrr the job unschedules itself; under plain cron the same script just
+no-ops after expiry, so it stays portable.
 
 ## Security
 
-**scriptrr ships with no authentication.** Anyone who can reach the port can
-add, edit, run, and delete scripts — and run arbitrary code on the host with the
+**scriptrr ships with no authentication.** Anyone who can reach the port can add,
+edit, run, and delete scripts — and execute arbitrary code on the host with the
 container's permissions. Treat it as a trusted-LAN tool:
 
 - Do **not** expose it directly to the internet.
 - Put it behind a reverse proxy that provides auth (Authelia, oauth2-proxy,
-  basic auth), or reach it over a VPN/Tailscale.
-- Mount only the paths your scripts actually need. Mounting the Docker socket
-  or a broad host path widens the blast radius.
+  basic auth), or reach it over a VPN / Tailscale.
+- Mount only the paths your scripts actually need. Mounting the Docker socket or
+  a broad host path widens the blast radius.
 
 ## License
 
