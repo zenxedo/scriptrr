@@ -1,12 +1,10 @@
-pip-requests
-apt-curl
-apt-jq
-pip-guessit
-pip-qbittorrent-api
-pip-flask-socketio
-pip-eventlet
-pip-pytest
-pip-fastapi
-pip-uvicorn
-pip-python-multipart
-pip-apscheduler
+# Application dependencies.
+# The old pip-*/apt-* lines listed packages for the user's scripts, not the app.
+# Script dependencies belong in an image derived FROM this one (see README), e.g.:
+#   FROM ghcr.io/zenxedo/scriptrr:latest
+#   RUN pip install --no-cache-dir requests qbittorrent-api guessit
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+apscheduler

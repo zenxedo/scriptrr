@@ -1,6 +1,5 @@
 import asyncio
 import html
-import json
 import os
 import signal
 import subprocess
@@ -10,7 +9,6 @@ import sqlite3
 import shlex
 import threading
 from datetime import datetime
-from json import JSONDecodeError
 from pathlib import Path
 from urllib.parse import parse_qs, quote
 
@@ -34,9 +32,6 @@ scheduler = BackgroundScheduler() if BackgroundScheduler else None
 BASE_DIR = Path(__file__).resolve().parent
 SCRIPT_DIR = BASE_DIR / "scripts"
 LOG_DIR = BASE_DIR / "logs"
-METADATA_FILE = BASE_DIR / "metadata.json"
-SCHEDULE_METADATA_FILE = BASE_DIR / "schedule_metadata.json"
-TEMPLATE_FILE = BASE_DIR / "dashboard.html"
 DB_FILE = BASE_DIR / "scriptrr.db"
 STATIC_DIR = BASE_DIR / "static"
 
@@ -59,29 +54,6 @@ def render_dashboard(combined: list[dict], partial_only: bool = False, non_scrip
     
     # Load the main dashboard template shell
     return jinja.get_template("dashboard.html").render(combined=combined, non_script_files=non_script_files or [], internal_logs=internal_logs or [])
-
-
-def load_json(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        with path.open() as f:
-            return json.load(f)
-    except JSONDecodeError:
-        return {}
-
-
-def save_json(path: Path, data: dict) -> None:
-    with path.open("w") as f:
-        json.dump(data, f, indent=2)
-
-
-def load_metadata() -> dict:
-    return load_json(METADATA_FILE)
-
-
-def load_schedule_metadata() -> dict:
-    return load_json(SCHEDULE_METADATA_FILE)
 
 
 def get_relative_time(timestamp: float) -> str:

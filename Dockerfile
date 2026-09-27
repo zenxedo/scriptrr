@@ -1,50 +1,33 @@
-# Use a slim Python 3.12 image
 FROM python:3.12-slim
 
-# Set the working directory
-WORKDIR /app
-
-# Install system dependencies (optional, but good if your scripts need git or curl)
+# Scripts commonly shell out to these; bash is not in slim by default.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+        bash \
+        ca-certificates \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements list
+WORKDIR /app
+
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Sanitize inputs and install requirements
-RUN apt-get update && \
-    sed -i 's/\r$//' requirements.txt && \
-    while IFS= read -r pkg || [ -n "$pkg" ]; do \
-      [ -z "$pkg" ] && continue; \
-      if echo "$pkg" | grep -q '^pip-'; then \
-        name="${pkg#pip-}"; \
-        echo "📦 Installing pip package: $name"; \
-        pip install --no-cache-dir "$name" || { echo "❌ pip install failed: $name"; exit 1; }; \
-      elif echo "$pkg" | grep -q '^apt-'; then \
-        name="${pkg#apt-}"; \
-        echo "🔧 Installing apt package: $name"; \
-        apt-get install -y "$name" || { echo "❌ apt install failed: $name"; exit 1; }; \
-      else \
-        echo "❓ Unknown package type in requirements.txt: $pkg" && exit 1; \
-      fi; \
-    done < requirements.txt && \
-    rm -rf /var/lib/apt/lists/*
+# Copy the application in (the image is self-contained; scripts are mounted).
+COPY main.py ./
+COPY dashboard.html ./
+COPY partials/ ./partials/
+COPY static/ ./static/
 
-# Install only what the user explicitly requests in requirements.txt
+RUN mkdir -p /app/scripts /app/logs
 
-# Install required Python packages
-RUN pip install --no-cache-dir fastapi uvicorn jinja2 apscheduler
+# Run unprivileged. /app is chowned so SQLite, logs and uploaded scripts are writable.
+RUN useradd --create-home --uid 1000 scriptrr \
+    && chown -R scriptrr:scriptrr /app
+USER scriptrr
 
-# Copy your application files
-#COPY main.py .
-#COPY dashboard.html .
-
-# Create a volume-ready directory for scripts and logs
-#RUN mkdir -p /app/scripts /app/logs
-
-# Expose the app port
 EXPOSE 8000
 
-# Start the application
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/v2/dashboard').status==200 else 1)"
+
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
