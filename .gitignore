@@ -1,0 +1,52 @@
+# ── Secrets — never commit ──────────────────────────────────────────────
+.env
+.env.*
+*.env
+*.key
+*.pem
+*.p12
+*.pfx
+*secret*
+*secrets*
+secrets.env
+client_secrets.json
+credentials*
+*.token
+.infisical.json
+
+# ── Runtime data (belongs to backups/volumes, not git) ──────────────────
+logs/
+*.db
+*.sqlite
+*.sqlite3
+metadata.json
+schedule_metadata.json
+
+# User scripts are mounted at runtime, never committed
+scripts/*
+!scripts/.gitkeep
+
+# ── Python / build junk ─────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# ── Logs / transient ────────────────────────────────────────────────────
+*.log
+*.pid
+*.state
+
+# ── Manual pre-change backups ───────────────────────────────────────────
+*.bak
+*.bak-*
+*.old
+*.orig
+
+# ── OS / editor ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,136 @@
+{% for script in combined %}
+  <tr data-row-index="{{ loop.index }}" data-script-group="{{ loop.index }}" data-starred="{{ 'true' if script.starred else 'false' }}" data-edit-script='{{ {"name": script.name, "description": script.description, "tags": script.tags|join(", "), "content": script.content} | tojson }}' class="flex hover:bg-[#212126] transition border-b border-[#23232a] w-full items-center text-left">
+    <td class="px-4 py-3.5 w-64 flex-shrink-0 flex items-center gap-2 pr-6">
+      <input type="checkbox" id="toggle-{{ loop.index }}" class="hidden drawer-toggle" />
+      
+      <div data-action-container class="flex items-center gap-1.5">
+        {% if script.status == 'running' %}
+        <button disabled class="bg-blue-600/10 text-blue-400 border border-blue-500/20 opacity-60 cursor-not-allowed px-2 py-1 rounded text-sm font-medium flex items-center gap-1.5">
+          <i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Running
+        </button>
+        <button class="bg-rose-600/10 text-rose-400 border border-rose-500/20 hover:bg-rose-600/30 px-2 py-1 rounded text-sm font-medium flex items-center gap-1.5 transition" hx-post="/v2/api/stop/{{ script.url }}" hx-swap="none">
+          <i data-lucide="square" class="fill-current w-3.5 h-3.5"></i> Stop
+        </button>
+        {% else %}
+        <button class="bg-blue-600/10 text-blue-400 border border-blue-500/20 hover:bg-blue-600/30 px-2 py-1 rounded text-sm font-medium flex items-center gap-1.5 transition" hx-post="/v2/api/run/{{ script.url }}" hx-include="#args-{{ loop.index }}" hx-swap="none" data-open-live="live-button-{{ loop.index }}">
+          <i data-lucide="play" class="fill-current w-3.5 h-3.5"></i> Run
+        </button>
+        {% endif %}
+      </div>
+
+      {# Live button removed — live rows will auto-open when script is running. #}
+      
+      <button type="button" data-log-button data-log-row="log-row-{{ loop.index }}" data-log-console="log-console-{{ loop.index }}" data-log-url="/view_log/{{ script.url }}.log" class="bg-violet-600/10 text-violet-400 border border-violet-500/20 hover:bg-violet-600/30 px-2 py-1 rounded text-sm font-medium flex items-center gap-1.5 transition">
+        <i data-lucide="file-text" class="w-3.5 h-3.5"></i> Log
+      </button>
+      <label for="toggle-{{ loop.index }}" role="button" tabindex="0" class="bg-amber-600/10 text-amber-400 border border-amber-500/20 hover:bg-amber-600/30 p-1 rounded transition cursor-pointer flex items-center" title="Add arguments" aria-label="Add arguments">
+        <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+      </label>
+    </td>
+    <td class="px-3 py-3.5 w-12 flex-shrink-0 flex items-center justify-center">
+      <button type="button" data-star-toggle data-star-url="/v2/api/script/{{ script.url }}/toggle-star" onclick="window.toggleStar(this); return false;" class="flex items-center p-1 rounded transition text-gray-600 hover:text-amber-400" title="{{ 'Unstar script' if script.starred else 'Star script' }}" aria-label="{{ 'Unstar script' if script.starred else 'Star script' }}">
+        <i data-lucide="star" class="w-4 h-4 {{ 'fill-current text-amber-400' if script.starred else '' }}"></i>
+      </button>
+    </td>
+    <td class="px-4 py-3.5 w-64 flex-shrink-0 text-gray-200">
+      <button type="button" onclick='openEditScriptModal(JSON.parse(this.closest("tr").dataset.editScript))' class="cursor-pointer hover:text-blue-400 transition flex items-center gap-2 w-full h-full text-left select-none" title="View / edit script">
+        {% if script.type == 'python' %}
+        <span class="text-emerald-400 flex items-center justify-center bg-emerald-500/10 p-1 rounded">
+          <i data-lucide="file-code-2" class="w-3.5 h-3.5"></i>
+        </span>
+        {% else %}
+        <span class="text-blue-400 flex items-center justify-center bg-blue-500/10 p-1 rounded">
+          <i data-lucide="terminal" class="w-3.5 h-3.5"></i>
+        </span>
+        {% endif %}
+        <span class="truncate font-sans text-base leading-5 font-normal text-gray-100">{{ script.name }}</span>
+      </button>
+    </td>
+    <td class="px-4 py-3.5 flex-1 min-w-0 text-gray-400" id="desc-container-{{ loop.index }}">
+      <div class="flex items-center justify-between group/desc p-1 rounded transition">
+        <p class="truncate text-gray-300 pr-4">{{ script.description or 'No description' }}</p>
+      </div>
+    </td>
+    <td class="px-4 py-3.5 w-36 flex-shrink-0 flex items-center gap-1 truncate">
+      {% for tag in script.tags %}
+      <span data-tag-name="{{ tag }}" class="bg-blue-950/40 text-blue-400 border border-blue-500/20 text-xs uppercase font-bold tracking-wider px-1.5 py-0.5 rounded">{{ tag }}</span>
+      {% else %}
+      <span class="text-gray-600 text-xs">-</span>
+      {% endfor %}
+    </td>
+    <td class="px-4 py-3.5 w-36 flex-shrink-0 text-gray-400 text-sm flex items-center">{{ script.last_run }}</td>
+    <td class="px-4 py-3.5 w-28 flex-shrink-0 flex items-center" data-status-name="{{ script.name }}">
+      {% if script.status == 'running' %}
+      <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20"><span class="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse"></span> RUNNING</span>
+      {% elif script.status == 'pass' %}
+      <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"><span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span> PASS</span>
+      {% elif script.status == 'fail' %}
+      <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20"><span class="h-1.5 w-1.5 rounded-full bg-rose-400"></span> FAIL</span>
+      {% else %}
+      <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-gray-500/10 text-gray-400 border border-gray-500/20"><span class="h-1.5 w-1.5 rounded-full bg-gray-400"></span> IDLE</span>
+      {% endif %}
+    </td>
+    <td class="px-4 py-3.5 w-40 flex-shrink-0 text-gray-400 text-sm flex items-center">{{ script.next_run or 'Not scheduled' }}</td>
+    <td class="px-4 py-3.5 w-24 flex-shrink-0 text-right flex items-center justify-end gap-2.5">
+      <button type="button" class="text-gray-500 hover:text-blue-400 transition flex items-center gap-1" title="Edit schedule" aria-label="Edit schedule" onclick='openScheduleModal({{ script.name|tojson }}, {{ script.url|tojson }}, {{ script.schedule_raw|tojson }})'>
+        <i data-lucide="calendar" class="w-4 h-4"></i>
+        <span class="sr-only">Schedule</span>
+      </button>
+      <button type="button" class="text-gray-600 hover:text-white transition flex items-center" title="Edit Script"
+        onclick='openEditScriptModal(JSON.parse(this.closest("tr").dataset.editScript))'>
+        <i data-lucide="edit-3" class="w-4 h-4"></i>
+      </button>
+      <i data-lucide="settings" class="text-gray-600 hover:text-white cursor-pointer transition w-4 h-4" title="Settings"></i>
+      <button hx-post="/v2/api/script/{{ script.url }}/delete" hx-confirm="Are you sure you want to permanently delete {{ script.name }}?" hx-target="#script-rows" hx-swap="innerHTML" class="text-gray-600 hover:text-rose-500 transition flex items-center" title="Delete Script">
+        <i data-lucide="trash-2" class="w-4 h-4"></i>
+      </button>
+    </td>
+  </tr>
+
+  <tr data-script-group="{{ loop.index }}" data-starred="{{ 'true' if script.starred else 'false' }}" class="flex bg-[#16161a]/60 border-b border-[#23232a] w-full hidden drawer-container">
+    <td class="px-6 py-4 w-full" colspan="9">
+      <div class="flex flex-col md:flex-row items-start md:items-center gap-6 justify-between bg-[#121214] p-4 rounded-md border border-[#23232a] w-full">
+        <div class="w-full md:max-w-xl">
+          <label class="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1.5">Script Execution Arguments</label>
+          <div class="flex gap-2">
+            <input type="text" name="args" id="args-{{ loop.index }}" value="{{ script.default_args }}" placeholder="Pass individual arguments..." class="w-full bg-[#1a1a1e] border border-[#23232a] text-sm rounded px-3 py-1.5 text-gray-200 focus:outline-none focus:border-blue-500" />
+            <button class="bg-[#23232a] hover:bg-[#2b2b35] border border-gray-700 text-xs text-gray-200 px-3 py-1.5 rounded font-medium transition" hx-post="/v2/api/script/{{ script.url }}/save-args" hx-include="#args-{{ loop.index }}">Save Defaults</button>
+          </div>
+        </div>
+        <div class="text-xs text-gray-500 flex flex-col gap-1 text-right self-end md:self-center">
+          <span><strong class="text-gray-400">File path:</strong> /scripts/{{ script.name }}</span>
+        </div>
+      </div>
+    </td>
+  </tr>
+
+  <tr id="live-row-{{ loop.index }}" data-live-url="/v2/log-stream/{{ script.url }}" data-live-name="{{ script.name }}" data-script-group="{{ loop.index }}" data-starred="{{ 'true' if script.starred else 'false' }}" class="flex bg-[#0f0f12] border-b border-[#23232a] w-full hidden">
+    <td class="px-4 py-3 flex-1" colspan="9">
+      <div class="border border-[#2a2a32] rounded-md overflow-hidden bg-[#101014] w-full">
+        <div class="px-3 py-2 bg-[#18181d] border-b border-[#2a2a32] flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <button type="button" data-live-close onclick="window.closeLiveLog(this)" class="text-gray-500 hover:text-white transition" title="Close live log" aria-label="Close live log">
+              <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+            <span class="text-xs font-semibold text-gray-300 font-mono">{{ script.name }} live output</span>
+          </div>
+          <div class="flex items-center gap-3">
+            <span id="live-state-{{ loop.index }}" class="text-[11px] text-gray-500">closed</span>
+          </div>
+        </div>
+        <pre id="live-console-{{ loop.index }}" class="w-full h-64 overflow-auto whitespace-pre-wrap break-words p-3 text-xs leading-5 text-gray-200 font-mono"></pre>
+      </div>
+    </td>
+  </tr>
+
+  <tr id="log-row-{{ loop.index }}" data-script-group="{{ loop.index }}" data-starred="{{ 'true' if script.starred else 'false' }}" class="flex bg-[#0f0f12] border-b border-[#23232a] w-full hidden">
+    <td class="px-4 py-3 flex-1" colspan="9">
+      <div class="border border-[#2a2a32] rounded-md overflow-hidden bg-[#101014] w-full">
+        <div class="px-3 py-2 bg-[#18181d] border-b border-[#2a2a32] flex items-center justify-between">
+          <span class="text-xs font-semibold text-gray-300 font-mono">{{ script.name }} full log</span>
+        </div>
+        <pre id="log-console-{{ loop.index }}" class="w-full h-64 overflow-auto whitespace-pre-wrap break-words p-3 text-xs leading-5 text-gray-200 font-mono"></pre>
+      </div>
+    </td>
+  </tr>
+{% endfor %}

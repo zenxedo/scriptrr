@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en" class="bg-[#121214] text-white">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Scriptrr Dashboard v3</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/htmx/1.9.12/htmx.min.js"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.12/dist/ext/sse.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+      ::-webkit-scrollbar { width: 8px; background: #18181b; }
+      ::-webkit-scrollbar-thumb { background: #23232a; border-radius: 4px; }
+      svg { width: 1rem !important; height: 1rem !important; display: inline-block; }
+      header svg, .header-btn svg { width: 1.25rem !important; height: 1.25rem !important; }
+      tr:has(.drawer-toggle:checked) + .drawer-container { display: flex !important; }
+    </style>
+  </head>
+  <body class="bg-[#121214] min-h-screen font-sans">
+    
+    <!-- Top Bar Component -->
+    <header class="w-full bg-[#1a1a1e] border-b border-[#23232a] flex items-center px-6 py-3">
+      <div class="flex items-center flex-1"><span class="text-2xl font-bold tracking-tight text-white">Scriptrr</span></div>
+      <div class="flex-1 flex justify-center">
+        <div class="relative w-full max-w-md">
+          <input type="text" name="search" placeholder="Search scripts..." hx-post="/v2/api/scripts/search" hx-trigger="keyup changed delay:300ms" hx-target="#script-rows" class="w-full bg-[#23232a] text-sm text-white rounded-md pl-10 pr-4 py-2 border border-transparent focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600 transition" />
+          <span class="absolute left-3 top-2.5 text-gray-400"><i data-lucide="search"></i></span>
+        </div>
+      </div>
+      <div class="flex items-center gap-3 flex-1 justify-end header-btn">
+        <button onclick="document.getElementById('add-script-modal').classList.remove('hidden')" class="ml-2 px-4 py-2 flex items-center gap-2 rounded-md text-sm border border-transparent bg-blue-600 text-white hover:bg-blue-700 transition font-medium">
+          <i data-lucide="plus" class="w-4 h-4"></i> Add Script
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Table Layout Panel -->
+    <main class="px-6 py-6">
+      <div class="overflow-x-auto rounded-lg border border-[#23232a] bg-[#1a1a1e]">
+        <table class="min-w-full text-base text-left border-collapse flex flex-col">
+          <thead>
+            <tr class="flex bg-[#16161a] border-b border-[#23232a] text-gray-400 uppercase text-xs tracking-wider font-semibold w-full items-center">
+              <th class="px-4 py-3 w-64 flex-shrink-0">Actions</th>
+              <th class="px-3 py-3 w-12 flex-shrink-0 text-center">
+                <button type="button" data-star-filter class="text-gray-500 hover:text-amber-400 transition" title="Show starred scripts" aria-label="Show starred scripts">
+                  <i data-lucide="star" class="w-4 h-4"></i>
+                </button>
+              </th>
+              <th class="px-4 py-3 w-64 flex-shrink-0 cursor-pointer hover:text-white transition group" hx-get="/v2/api/scripts?sort=name" hx-target="#script-rows">
+                <div class="flex items-center gap-1"><span class="ml-6">Script Name</span> <i data-lucide="chevrons-up-down" class="w-3 h-3 text-gray-600 group-hover:text-gray-400"></i></div>
+              </th>
+              <th class="px-4 py-3 flex-1">Description</th>
+              <th class="px-4 py-3 w-36 flex-shrink-0">Tags</th>
+              <th class="px-4 py-3 w-36 flex-shrink-0 cursor-pointer hover:text-white transition group" hx-get="/v2/api/scripts?sort=last_run" hx-target="#script-rows">
+                <div class="flex items-center gap-1">Last Run <i data-lucide="chevrons-up-down" class="w-3 h-3 text-gray-600 group-hover:text-gray-400"></i></div>
+              </th>
+              <th class="px-4 py-3 w-28 flex-shrink-0 cursor-pointer hover:text-white transition group" hx-get="/v2/api/scripts?sort=status" hx-target="#script-rows">
+                <div class="flex items-center gap-1">Status <i data-lucide="chevrons-up-down" class="w-3 h-3 text-gray-600 group-hover:text-gray-400"></i></div>
+              </th>
+              <th class="px-4 py-3 w-40 flex-shrink-0 cursor-pointer hover:text-white transition group" hx-get="/v2/api/scripts?sort=next_run" hx-target="#script-rows">
+                <div class="flex items-center gap-1">Next Run <i data-lucide="chevrons-up-down" class="w-3 h-3 text-gray-600 group-hover:text-gray-400"></i></div>
+              </th>
+              <th class="px-4 py-3 w-24 flex-shrink-0 text-right"></th>
+            </tr>
+          </thead>
+          <tbody id="script-rows" class="divide-y divide-[#23232a] flex flex-col w-full">
+            <!-- Include Row Sub-Template Structure -->
+            {% include "partials/script_rows.html" %}
+          </tbody>
+        </table>
+      </div>
+    </main>
+
+    <!-- Include Creation Modal Panel Module -->
+    {% include "partials/add_script_modal.html" %}
+
+    <!-- Include Edit Modal Panel Module -->
+    {% include "partials/edit_script_modal.html" %}
+    
+    <!-- Include Schedule Modal Panel Module -->
+    {% include "partials/schedule_modal.html" %}
+
+    <!-- Link Unified Script Interaction Sheet -->
+    <script src="/static/dashboard.js?v=20260803-6"></script>
+    <!-- Internal Logs & Attachments Panel -->
+    <div class="px-6 pb-6">
+      <div class="overflow-hidden rounded-lg border border-[#23232a] bg-[#1a1a1e] p-4">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-semibold text-gray-300">Internal Logs & Attachments</h3>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <h4 class="text-xs text-gray-400 uppercase mb-2">Recent Logs</h4>
+            <ul class="text-sm text-gray-300 space-y-1">
+              {% for log in internal_logs %}
+              <li class="flex items-center justify-between">
+                <div class="truncate">{{ log.name }}</div>
+                <div class="flex items-center gap-2">
+                  <button data-log-view url="/view_log/{{ log.url }}" class="view-log-btn text-xs text-blue-400 hover:underline">View</button>
+                  <span class="text-xs text-gray-500">{{ log.mtime | int }}</span>
+                </div>
+              </li>
+              {% else %}
+              <li class="text-gray-600 text-xs">No logs found</li>
+              {% endfor %}
+            </ul>
+          </div>
+          <div>
+            <h4 class="text-xs text-gray-400 uppercase mb-2">Attachments (non .py/.sh)</h4>
+            <ul class="text-sm text-gray-300 space-y-1">
+              {% for f in non_script_files %}
+              <li class="flex items-center justify-between">
+                <div class="truncate">{{ f.name }}</div>
+                <div class="flex items-center gap-2">
+                  <button class="view-file-btn text-xs text-blue-400 hover:underline" data-file-url="/v2/view/script-file/{{ f.url }}">View</button>
+                </div>
+              </li>
+              {% else %}
+              <li class="text-gray-600 text-xs">No attachments found</li>
+              {% endfor %}
+            </ul>
+          </div>
+        </div>
+
+        <!-- Viewer Modal -->
+        <div id="file-viewer-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div class="bg-[#0f0f12] border border-[#23232a] rounded w-11/12 md:w-3/4 lg:w-2/3 max-h-[80vh] overflow-auto">
+            <div class="px-4 py-3 border-b border-[#23232a] flex items-center justify-between">
+              <strong id="file-viewer-title" class="text-sm text-gray-200">File Viewer</strong>
+              <button id="file-viewer-close" class="text-gray-400 hover:text-white px-2">Close</button>
+            </div>
+            <pre id="file-viewer-content" class="p-4 text-xs text-gray-200 font-mono whitespace-pre-wrap break-words"></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+pip-requests
+apt-curl
+apt-jq
+pip-guessit
+pip-qbittorrent-api
+pip-flask-socketio
+pip-eventlet
+pip-pytest
+pip-fastapi
+pip-uvicorn
+pip-python-multipart
+pip-apscheduler

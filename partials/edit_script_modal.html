@@ -1,0 +1,65 @@
+<div id="edit-script-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+  <div class="bg-[#1a1a1e] border border-[#23232a] rounded-lg shadow-2xl w-full max-w-3xl flex flex-col max-h-[90vh]">
+    
+    <div class="px-6 py-4 border-b border-[#23232a] flex justify-between items-center shrink-0">
+      <h2 class="text-lg font-semibold text-white flex items-center gap-2">
+        <i data-lucide="edit-3" class="w-5 h-5 text-blue-500"></i> Edit Script
+      </h2>
+      <button onclick="document.getElementById('edit-script-modal').classList.add('hidden')" class="text-gray-400 hover:text-white transition">
+        <i data-lucide="x" class="w-5 h-5"></i>
+      </button>
+    </div>
+
+    <div id="edit-script-modal-body" class="p-6 overflow-y-auto flex-1">
+      <form id="edit-script-form" class="flex flex-col gap-5">
+        
+        <!-- Name Field -->
+        <div>
+          <label for="edit-name" class="block text-sm font-medium text-gray-400 mb-1">Name</label>
+          <input type="text" id="edit-name" name="name" required
+            class="w-full bg-[#23232a] text-sm text-white rounded-md px-4 py-2 border border-transparent focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600 transition" />
+        </div>
+
+        <!-- Description Field -->
+        <div>
+          <label for="edit-description" class="block text-sm font-medium text-gray-400 mb-1">Description</label>
+          <input type="text" id="edit-description" name="description"
+            class="w-full bg-[#23232a] text-sm text-white rounded-md px-4 py-2 border border-transparent focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600 transition" />
+        </div>
+
+        <!-- Tags Field -->
+        <div>
+          <label class="block text-sm font-medium text-gray-400 mb-1">Tags</label>
+          <div id="edit-tags-picker" class="w-full bg-[#23232a] text-sm text-white rounded-md px-3 py-2 border border-transparent focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600 transition">
+            <div id="edit-available-tags" class="flex flex-wrap gap-2 mb-2"></div>
+            <div id="edit-applied-tags" class="flex flex-wrap gap-2 mb-2"></div>
+            <div class="flex gap-2 mt-1">
+              <input type="text" id="edit-new-tag" placeholder="Add new tag" class="flex-1 bg-transparent text-sm text-white px-2 py-1 border border-[#2a2a32] rounded" />
+              <button type="button" id="edit-add-tag-btn" class="px-3 py-1 bg-blue-600 text-white rounded text-sm">Add</button>
+            </div>
+            <!-- Hidden input to preserve form submission format (comma-separated) -->
+            <input type="hidden" id="edit-tags" name="tags" />
+          </div>
+        </div>
+
+        <!-- Script Content Field -->
+        <div class="flex-1 flex flex-col">
+          <label for="edit-content" class="block text-sm font-medium text-gray-400 mb-1">Script Content</label>
+          <textarea id="edit-content" name="content" rows="12" required
+            class="w-full bg-[#23232a] text-sm text-white font-mono rounded-md px-4 py-2 border border-transparent focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600 transition resize-y"></textarea>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="flex justify-end gap-3 pt-4 border-t border-[#23232a]">
+          <button type="button" onclick="document.getElementById('edit-script-modal').classList.add('hidden')" class="px-4 py-2 rounded-md text-sm border border-[#2a2a32] bg-[#16161a] text-gray-300 hover:text-white hover:bg-[#23232a] transition">
+            Cancel
+          </button>
+          <button type="submit" class="px-4 py-2 rounded-md text-sm border border-transparent bg-blue-600 text-white hover:bg-blue-700 transition font-medium">
+            Save Changes
+          </button>
+        </div>
+
+      </form>
+    </div>
+  </div>
+</div>
