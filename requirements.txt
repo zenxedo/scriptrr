@@ -1,8 +1,9 @@
 # Application dependencies.
-# The old pip-*/apt-* lines listed packages for the user's scripts, not the app.
-# Script dependencies belong in an image derived FROM this one (see README), e.g.:
-#   FROM ghcr.io/zenxedo/scriptrr:latest
-#   RUN pip install --no-cache-dir requests qbittorrent-api guessit
+#
+# Script dependencies are NOT listed here — the published image contains only
+# the app. Build a derived image to add your own packages (see README):
+#   FROM zenxedo/scriptrr:latest
+#   RUN pip install --no-cache-dir requests
 fastapi
 uvicorn[standard]
 jinja2
