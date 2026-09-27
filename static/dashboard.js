@@ -114,6 +114,8 @@ function openEditScriptModal(script) {
       appliedContainer.innerHTML = '';
 
       available.forEach(function(name){
+        // Applied tags already render in the applied list below; don't duplicate.
+        if (applied.includes(name)) return;
         const chip = makeTagChip(name);
         chip.addEventListener('click', function(){
           // toggle applied
@@ -128,7 +130,8 @@ function openEditScriptModal(script) {
         const chip = makeTagChip(name, 'bg-emerald-600/10 text-emerald-400 border border-emerald-500/20');
         const remove = document.createElement('button');
         remove.type = 'button';
-        remove.className = 'ml-1 text-xs text-gray-400';
+        remove.className = 'ml-1 text-xs text-gray-400 hover:text-rose-400 transition';
+        remove.title = 'Remove tag';
         remove.textContent = '×';
         remove.addEventListener('click', function(){ applied = applied.filter(t => t !== name); renderLists(); });
         const wrapper = document.createElement('span');
