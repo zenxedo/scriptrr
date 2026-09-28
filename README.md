@@ -67,6 +67,15 @@ too:
 > **Running as non-root.** The image runs as uid `1000`, so the host files you
 > mount must be writable by that user — e.g. `chown -R 1000:1000 ./data`.
 
+### Image tags
+
+| Tag | Tracks | Use when |
+|---|---|---|
+| `latest` | newest tagged release (stable) | you want released versions only |
+| `edge` | newest commit on `main` | you want fixes as soon as they land |
+| `1.2.3` / `1.2` / `1` | a specific release | you need it pinned |
+| `sha-abc1234` | a specific commit | precise debugging |
+
 ### Docker Compose
 
 ```yaml
