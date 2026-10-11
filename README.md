@@ -96,8 +96,49 @@ services:
 
 ## Script dependencies
 
-The published image contains only the app. If your scripts need extra Python
-packages or system tools, build a thin image on top of it:
+The published image contains only the app. There are two ways to give your
+scripts the Python packages and system tools they need.
+
+### Recommended — install at start with env vars
+
+Override the container's start command so it installs a space-separated list of
+packages before launching the app, and list those packages as environment
+variables. No rebuild, no derived image — edit compose and recreate:
+
+```yaml
+services:
+  scriptrr:
+    image: zenxedo/scriptrr:latest
+    # Root so apt-get works and root-owned secrets files stay readable.
+    user: "0:0"
+    environment:
+      EXTRA_APT_PACKAGES: "jq"          # space-separated; blank/omit = none
+      EXTRA_PIP_PACKAGES: "requests"    # space-separated; blank/omit = none
+    command:
+      - sh
+      - -c
+      - >-
+        if [ -n "$EXTRA_APT_PACKAGES" ]; then
+        apt-get update -qq && apt-get install -y -qq --no-install-recommends $EXTRA_APT_PACKAGES &&
+        rm -rf /var/lib/apt/lists/*; fi &&
+        if [ -n "$EXTRA_PIP_PACKAGES" ]; then
+        python3 -m pip install --no-cache-dir --quiet $EXTRA_PIP_PACKAGES; fi &&
+        exec uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+To add a dependency, edit the two env vars and run `docker compose up -d`.
+Installs happen on each start and persist for the container's life; a recreate
+re-installs. (`user: "0:0"` is only required for `apt` packages and to read
+root-owned secret files — a pip-only setup can drop it.)
+
+> **Compose escaping:** in a compose file a literal `$` is written `$$`, so the
+> command above must reference `$$EXTRA_PIP_PACKAGES` / `$$EXTRA_APT_PACKAGES`
+> (compose collapses `$$` → `$` before the shell sees it).
+
+### Alternative — a thin derived image
+
+Prefer deps baked into an image (installed once at build, no start-time cost)?
+Build on top of the published one:
 
 ```dockerfile
 FROM zenxedo/scriptrr:latest
