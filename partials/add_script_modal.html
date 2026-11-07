@@ -44,6 +44,14 @@
             <label class="block text-xs font-semibold text-gray-400 mb-1.5">Description (Optional)</label>
             <input type="text" name="description" placeholder="What does this do?" class="w-full bg-[#121214] border border-[#23232a] rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-600" />
           </div>
+          <div class="w-48">
+            <label class="block text-xs font-semibold text-gray-400 mb-1.5">Safety Tier</label>
+            <select name="safety" class="w-full bg-[#121214] border border-[#23232a] rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-600">
+              <option value="green">green — safe</option>
+              <option value="cautious">cautious — mutates</option>
+              <option value="helper">helper — utility</option>
+            </select>
+          </div>
         </div>
         
         <div class="flex-1 min-h-[250px] flex flex-col">

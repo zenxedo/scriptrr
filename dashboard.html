@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Scriptrr Dashboard v3</title>
+    <title>Scriptrr — Flight Deck</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/htmx/1.9.12/htmx.min.js"></script>
     <script src="https://unpkg.com/htmx.org@1.9.12/dist/ext/sse.js"></script>
@@ -36,6 +36,19 @@
 
     <!-- Main Table Layout Panel -->
     <main class="px-6 py-6">
+      <!-- Flight-deck filter pills -->
+      <div id="filter-pills" class="flex flex-wrap items-center gap-2 mb-4">
+        <button type="button" data-filter-pill="active" class="filter-pill px-3 py-1.5 rounded-md text-xs font-semibold uppercase tracking-wider border transition">Active</button>
+        <button type="button" data-filter-pill="green" class="filter-pill px-3 py-1.5 rounded-md text-xs font-semibold uppercase tracking-wider border transition">Green-light</button>
+        <button type="button" data-filter-pill="cautious" class="filter-pill px-3 py-1.5 rounded-md text-xs font-semibold uppercase tracking-wider border transition">Cautious</button>
+        <button type="button" data-filter-pill="scheduled" class="filter-pill px-3 py-1.5 rounded-md text-xs font-semibold uppercase tracking-wider border transition">Scheduled</button>
+        <button type="button" data-filter-pill="failing" class="filter-pill px-3 py-1.5 rounded-md text-xs font-semibold uppercase tracking-wider border transition">Failing</button>
+        <button type="button" data-filter-pill="retired" class="filter-pill px-3 py-1.5 rounded-md text-xs font-semibold uppercase tracking-wider border transition">Nudges / Retired</button>
+        <button type="button" data-filter-pill="helper" class="filter-pill px-3 py-1.5 rounded-md text-xs font-semibold uppercase tracking-wider border transition">Helpers</button>
+        <button type="button" data-filter-pill="all" class="filter-pill px-3 py-1.5 rounded-md text-xs font-semibold uppercase tracking-wider border transition">All</button>
+        <span id="filter-count" class="ml-2 text-xs text-gray-500"></span>
+      </div>
+
       <div class="overflow-x-auto rounded-lg border border-[#23232a] bg-[#1a1a1e]">
         <table class="min-w-full text-base text-left border-collapse flex flex-col">
           <thead>
@@ -81,7 +94,7 @@
     {% include "partials/schedule_modal.html" %}
 
     <!-- Link Unified Script Interaction Sheet -->
-    <script src="/static/dashboard.js?v=20260803-6"></script>
+    <script src="/static/dashboard.js?v=20261107-1"></script>
     <!-- Internal Logs & Attachments Panel -->
     <div class="px-6 pb-6">
       <div class="overflow-hidden rounded-lg border border-[#23232a] bg-[#1a1a1e] p-4">

@@ -7,6 +7,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
+# uv gives instant PEP 723 inline-dependency support (`# /// script`) to scripts
+# launched by the runner, with no per-script venv management.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
 WORKDIR /app
 
 COPY requirements.txt .
@@ -17,6 +21,8 @@ COPY main.py ./
 COPY dashboard.html ./
 COPY partials/ ./partials/
 COPY static/ ./static/
+COPY entrypoint.sh ./entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 RUN mkdir -p /app/scripts /app/logs
 
@@ -30,4 +36,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/v2/dashboard').status==200 else 1)"
 
+# entrypoint.sh applies EXTRA_APT_PACKAGES / EXTRA_PIP_PACKAGES (optional),
+# then execs this command.
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

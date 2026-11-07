@@ -1,5 +1,5 @@
 {% for script in combined %}
-  <tr data-row-index="{{ loop.index }}" data-script-group="{{ loop.index }}" data-starred="{{ 'true' if script.starred else 'false' }}" data-edit-script='{{ {"name": script.name, "description": script.description, "tags": script.tags|join(", "), "content": script.content} | tojson }}' class="flex hover:bg-[#212126] transition border-b border-[#23232a] w-full items-center text-left">
+  <tr data-row-index="{{ loop.index }}" data-script-group="{{ loop.index }}" data-starred="{{ 'true' if script.starred else 'false' }}" data-safety="{{ script.safety }}" data-retired="{{ 'true' if script.retired else 'false' }}" data-scheduled="{{ 'true' if script.schedule_raw else 'false' }}" data-status="{{ script.status }}" data-edit-script='{{ {"name": script.name, "description": script.description, "tags": script.tags|join(", "), "safety": script.safety, "content": script.content} | tojson }}' class="flex hover:bg-[#212126] transition border-b border-[#23232a] w-full items-center text-left">
     <td class="px-4 py-3.5 w-64 flex-shrink-0 flex items-center gap-2 pr-6">
       <input type="checkbox" id="toggle-{{ loop.index }}" class="hidden drawer-toggle" />
       
@@ -35,15 +35,24 @@
     <td class="px-4 py-3.5 w-64 flex-shrink-0 text-gray-200">
       <button type="button" onclick='openEditScriptModal(JSON.parse(this.closest("tr").dataset.editScript))' class="cursor-pointer hover:text-blue-400 transition flex items-center gap-2 w-full h-full text-left select-none" title="View / edit script">
         {% if script.type == 'python' %}
-        <span class="text-emerald-400 flex items-center justify-center bg-emerald-500/10 p-1 rounded">
+        <span class="text-emerald-400 flex items-center justify-center bg-emerald-500/10 p-1 rounded shrink-0">
           <i data-lucide="file-code-2" class="w-3.5 h-3.5"></i>
         </span>
         {% else %}
-        <span class="text-blue-400 flex items-center justify-center bg-blue-500/10 p-1 rounded">
+        <span class="text-blue-400 flex items-center justify-center bg-blue-500/10 p-1 rounded shrink-0">
           <i data-lucide="terminal" class="w-3.5 h-3.5"></i>
         </span>
         {% endif %}
         <span class="truncate font-sans text-base leading-5 font-normal text-gray-100">{{ script.name }}</span>
+        {% if script.retired %}
+        <span title="{{ script.retired_reason or 'retired' }}" class="shrink-0 bg-purple-500/10 text-purple-300 border border-purple-500/30 text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded">Retired</span>
+        {% elif script.safety == 'cautious' %}
+        <span title="Mutates data — confirm before running" class="shrink-0 bg-amber-500/10 text-amber-400 border border-amber-500/30 text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded">Cautious</span>
+        {% elif script.safety == 'helper' %}
+        <span title="Library / utility script — not a standalone job" class="shrink-0 bg-slate-500/10 text-slate-400 border border-slate-500/30 text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded">Helper</span>
+        {% else %}
+        <span title="Safe for autonomous agent execution" class="shrink-0 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded">Green</span>
+        {% endif %}
       </button>
     </td>
     <td class="px-4 py-3.5 flex-1 min-w-0 text-gray-400" id="desc-container-{{ loop.index }}">
@@ -58,7 +67,14 @@
       <span class="text-gray-600 text-xs">-</span>
       {% endfor %}
     </td>
-    <td class="px-4 py-3.5 w-36 flex-shrink-0 text-gray-400 text-sm flex items-center">{{ script.last_run }}</td>
+    <td class="px-4 py-3.5 w-36 flex-shrink-0 text-gray-400 text-sm flex items-center">
+      <div class="flex flex-col leading-tight">
+        <span>{{ script.last_run }}</span>
+        {% if script.last_trigger or script.last_duration is not none %}
+        <span class="text-[11px] text-gray-500">{{ script.last_trigger or '—' }}{% if script.last_duration is not none %} · {{ '%.2fs'|format(script.last_duration) }}{% endif %}</span>
+        {% endif %}
+      </div>
+    </td>
     <td class="px-4 py-3.5 w-28 flex-shrink-0 flex items-center" data-status-name="{{ script.name }}">
       {% if script.status == 'running' %}
       <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20"><span class="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse"></span> RUNNING</span>
@@ -70,9 +86,16 @@
       <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-medium bg-gray-500/10 text-gray-400 border border-gray-500/20"><span class="h-1.5 w-1.5 rounded-full bg-gray-400"></span> IDLE</span>
       {% endif %}
     </td>
-    <td class="px-4 py-3.5 w-40 flex-shrink-0 text-gray-400 text-sm flex items-center">{{ script.next_run or 'Not scheduled' }}</td>
+    <td class="px-4 py-3.5 w-40 flex-shrink-0 text-gray-400 text-sm flex items-center">
+      <div class="flex flex-col leading-tight">
+        <span>{{ script.next_run or 'Not scheduled' }}</span>
+        {% if script.expires_at %}
+        <span class="text-[11px] text-purple-400">Expires {{ script.expires_at }}</span>
+        {% endif %}
+      </div>
+    </td>
     <td class="px-4 py-3.5 w-24 flex-shrink-0 text-right flex items-center justify-end gap-2.5">
-      <button type="button" class="text-gray-500 hover:text-blue-400 transition flex items-center gap-1" title="Edit schedule" aria-label="Edit schedule" onclick='openScheduleModal({{ script.name|tojson }}, {{ script.url|tojson }}, {{ script.schedule_raw|tojson }})'>
+      <button type="button" class="text-gray-500 hover:text-blue-400 transition flex items-center gap-1" title="Edit schedule" aria-label="Edit schedule" onclick='openScheduleModal({{ script.name|tojson }}, {{ script.url|tojson }}, {{ script.schedule_raw|tojson }}, {{ script.expires_at|tojson }}, {{ script.retired|tojson }})'>
         <i data-lucide="calendar" class="w-4 h-4"></i>
         <span class="sr-only">Schedule</span>
       </button>

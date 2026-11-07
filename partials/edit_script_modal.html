@@ -27,6 +27,18 @@
             class="w-full bg-[#23232a] text-sm text-white rounded-md px-4 py-2 border border-transparent focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600 transition" />
         </div>
 
+        <!-- Safety Tier Field -->
+        <div>
+          <label for="edit-safety" class="block text-sm font-medium text-gray-400 mb-1">Safety Tier</label>
+          <select id="edit-safety" name="safety"
+            class="w-full bg-[#23232a] text-sm text-white rounded-md px-4 py-2 border border-transparent focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600 transition">
+            <option value="green">green — Safe / Read-only / Dry-run by default</option>
+            <option value="cautious">cautious — Mutates data / Confirm first</option>
+            <option value="helper">helper — Library / Utility script</option>
+          </select>
+          <p class="text-[11px] text-gray-500 mt-1">Agents may run <strong>green</strong> scripts freely; <strong>cautious</strong> ones need explicit human approval.</p>
+        </div>
+
         <!-- Tags Field -->
         <div>
           <label class="block text-sm font-medium text-gray-400 mb-1">Tags</label>

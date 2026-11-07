@@ -2,6 +2,12 @@
 
 let currentSort = { column: '', order: '' };
 let starFilterActive = window.localStorage.getItem('scriptrr.starFilterActive') === 'true';
+let activeFilter = window.localStorage.getItem('scriptrr.filter') || 'active';
+
+const FILTER_PILL_CLASSES = {
+  on: ['bg-blue-600', 'text-white', 'border-blue-600'],
+  off: ['bg-[#1a1a1e]', 'text-gray-400', 'border-[#23232a]', 'hover:text-white', 'hover:border-[#3a3a44]']
+};
 
 function updateStarFilterButton() {
   const button = document.querySelector('[data-star-filter]');
@@ -12,12 +18,63 @@ function updateStarFilterButton() {
   button.setAttribute('aria-label', button.title);
 }
 
-function applyStarFilter() {
-  document.querySelectorAll('tr[data-script-group]').forEach(function(row) {
-    const shouldHide = starFilterActive && row.dataset.starred !== 'true';
-    row.hidden = shouldHide;
-    row.style.display = shouldHide ? 'none' : '';
+function updateFilterPills() {  document.querySelectorAll('[data-filter-pill]').forEach(function(button) {
+    const isOn = button.getAttribute('data-filter-pill') === activeFilter;
+    FILTER_PILL_CLASSES.off.forEach(function(cls) { button.classList.toggle(cls, !isOn); });
+    FILTER_PILL_CLASSES.on.forEach(function(cls) { button.classList.toggle(cls, isOn); });
   });
+}
+
+function rowMatchesFilter(mainRow) {
+  if (!mainRow) return true;
+  const safety = mainRow.dataset.safety || 'green';
+  const isRetired = mainRow.dataset.retired === 'true';
+  const isScheduled = mainRow.dataset.scheduled === 'true';
+  const status = mainRow.dataset.status || 'idle';
+
+  switch (activeFilter) {
+    case 'all':
+      return true;
+    case 'active':
+      // The default view: everything that is a live, runnable job.
+      return !isRetired && safety !== 'helper';
+    case 'green':
+      return !isRetired && safety === 'green';
+    case 'cautious':
+      return !isRetired && safety === 'cautious';
+    case 'scheduled':
+      return !isRetired && isScheduled;
+    case 'failing':
+      return !isRetired && status === 'fail';
+    case 'retired':
+      return isRetired;
+    case 'helper':
+      return safety === 'helper';
+    default:
+      return true;
+  }
+}
+
+function applyStarFilter() {
+  // Collect one "main" row per script group; align siblings (drawer/live/log).
+  const mainRows = {};
+  document.querySelectorAll('tr[data-script-group]').forEach(function(row) {
+    if (row.dataset.safety) mainRows[row.dataset.scriptGroup] = row;
+  });
+
+  let visible = 0;
+  document.querySelectorAll('tr[data-script-group]').forEach(function(row) {
+    const main = row.dataset.safety ? row : mainRows[row.dataset.scriptGroup];
+    const starred = (main || row).dataset.starred === 'true';
+    const hide = (starFilterActive && !starred) || !rowMatchesFilter(main);
+    row.hidden = hide;
+    row.style.display = hide ? 'none' : '';
+    if (!hide && row.dataset.safety) visible += 1;
+  });
+
+  const counter = document.getElementById('filter-count');
+  if (counter) counter.textContent = visible + ' shown';
+  updateFilterPills();
   updateStarFilterButton();
 }
 
@@ -44,13 +101,47 @@ function restoreActionButtons(el) {
   }, 900);
 }
 
-function openScheduleModal(name, url, currentSchedule) {
+function openScheduleModal(name, url, currentSchedule, expiresAt, isRetired) {
   document.getElementById('schedule-script-name').textContent = 'Configuring: ' + name;
   document.getElementById('schedule-input').value = currentSchedule || '';
-  
+  const expiresInput = document.getElementById('schedule-expires');
+  if (expiresInput) expiresInput.value = expiresAt || '';
+
   const form = document.getElementById('schedule-form');
   form.setAttribute('hx-post', '/v2/api/script/' + url + '/save-schedule');
-  
+
+  const retireRow = document.getElementById('schedule-retire-row');
+  const retireBtn = document.getElementById('schedule-retire-btn');
+  const retireReason = document.getElementById('schedule-retire-reason');
+  if (retireRow) retireRow.classList.toggle('hidden', !currentSchedule && !isRetired);
+  if (retireBtn) {
+    retireBtn.disabled = Boolean(isRetired);
+    retireBtn.classList.toggle('opacity-50', Boolean(isRetired));
+    retireBtn.classList.toggle('cursor-not-allowed', Boolean(isRetired));
+    retireBtn.textContent = isRetired ? 'Already retired' : 'Retire This Nudge Now';
+    retireBtn.onclick = async function() {
+      if (isRetired) return;
+      const reason = window.prompt('Why is this nudge retiring?', 'condition met');
+      if (reason === null) return;
+      try {
+        const res = await fetch('/v2/api/script/' + url + '/retire', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: new URLSearchParams({ reason: reason || 'retired via flight deck' }).toString()
+        });
+        const target = document.getElementById('script-rows');
+        if (target && res.ok) {
+          target.innerHTML = await res.text();
+          wireDashboard(target);
+          refreshIcons(target);
+          if (window.htmx) htmx.process(target);
+        }
+      } catch (e) { console.error('retire failed', e); }
+      closeScheduleModal();
+    };
+  }
+  if (retireReason) retireReason.textContent = isRetired ? 'This nudge is already retired; saving a schedule re-arms it.' : '';
+
   // Re-bind HTMX to the form since the target path was injected dynamically
   if (window.htmx) htmx.process(form);
   
@@ -74,6 +165,10 @@ function openEditScriptModal(script) {
   if (script.description !== undefined) {
     const descInput = document.getElementById('edit-description');
     if (descInput) descInput.value = script.description;
+  }
+  if (script.safety !== undefined) {
+    const safetySelect = document.getElementById('edit-safety');
+    if (safetySelect) safetySelect.value = script.safety || 'green';
   }
   if (script.tags !== undefined) {
     // script.tags currently comes in as comma-separated string (from data-edit-script)
@@ -342,6 +437,14 @@ function wireDashboard(root) {
   if (!document.body.dataset.starFilterWired) {
     document.body.dataset.starFilterWired = '1';
     document.body.addEventListener('click', function(evt) {
+      const pill = evt.target.closest('[data-filter-pill]');
+      if (pill) {
+        evt.preventDefault();
+        activeFilter = pill.getAttribute('data-filter-pill');
+        window.localStorage.setItem('scriptrr.filter', activeFilter);
+        applyStarFilter();
+        return;
+      }
       const button = evt.target.closest('[data-star-filter]');
       if (!button) return;
       evt.preventDefault();

@@ -1,5 +1,6 @@
 import asyncio
 import html
+import json
 import os
 import signal
 import subprocess
@@ -8,7 +9,9 @@ import time
 import sqlite3
 import shlex
 import threading
-from datetime import datetime
+import uuid
+from collections import deque
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import parse_qs, quote
 
@@ -25,7 +28,10 @@ except ImportError:
     CronTrigger = None
 
 
-app = FastAPI(title="Scriptrr v3")
+VERSION = "0.2.0"
+MCP_PROTOCOL_VERSIONS = ("2025-03-26", "2024-11-05")
+
+app = FastAPI(title="Scriptrr v0.2")
 _running_processes = {}
 scheduler = BackgroundScheduler() if BackgroundScheduler else None
 
@@ -34,6 +40,18 @@ SCRIPT_DIR = BASE_DIR / "scripts"
 LOG_DIR = BASE_DIR / "logs"
 DB_FILE = BASE_DIR / "scriptrr.db"
 STATIC_DIR = BASE_DIR / "static"
+
+SAFETY_TIERS = ("green", "cautious", "helper")
+METADATA_FIELDS = (
+    "description", "tags", "default_args", "schedule", "starred",
+    "safety", "expires_at", "retired", "retired_reason",
+)
+
+# Snapshot of the schedule-relevant metadata the running APScheduler reflects.
+# Compared against the DB on a timer so external `sqlite3` edits reconcile.
+_active_schedule_map: dict[str, tuple] = {}
+_schedule_lock = threading.Lock()
+_drift_thread_started = False
 
 STATIC_DIR.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -100,7 +118,9 @@ def init_db():
                 last_run REAL,
                 last_status TEXT,
                 pid INTEGER,
-                exit_code INTEGER
+                exit_code INTEGER,
+                last_duration REAL,
+                last_trigger TEXT DEFAULT ''
             )
         """)
         conn.execute("""
@@ -109,22 +129,129 @@ def init_db():
                 description TEXT DEFAULT '',
                 tags TEXT DEFAULT '',
                 default_args TEXT DEFAULT '',
-                schedule TEXT DEFAULT ''
+                schedule TEXT DEFAULT '',
+                starred INTEGER DEFAULT 0,
+                safety TEXT DEFAULT 'green',
+                expires_at TEXT DEFAULT '',
+                retired INTEGER DEFAULT 0,
+                retired_reason TEXT DEFAULT ''
             )
         """)
+
+        # In-place, data-preserving migrations for existing v0.1 databases.
+        metadata_migrations = {
+            "starred": "INTEGER DEFAULT 0",
+            "safety": "TEXT DEFAULT 'green'",
+            "expires_at": "TEXT DEFAULT ''",
+            "retired": "INTEGER DEFAULT 0",
+            "retired_reason": "TEXT DEFAULT ''",
+        }
         metadata_columns = {row[1] for row in conn.execute("PRAGMA table_info(script_metadata)")}
-        if "starred" not in metadata_columns:
-            conn.execute("ALTER TABLE script_metadata ADD COLUMN starred INTEGER DEFAULT 0")
+        for column, ddl in metadata_migrations.items():
+            if column not in metadata_columns:
+                conn.execute(f"ALTER TABLE script_metadata ADD COLUMN {column} {ddl}")
+
+        status_migrations = {
+            "last_duration": "REAL",
+            "last_trigger": "TEXT DEFAULT ''",
+        }
+        status_columns = {row[1] for row in conn.execute("PRAGMA table_info(script_status)")}
+        for column, ddl in status_migrations.items():
+            if column not in status_columns:
+                conn.execute(f"ALTER TABLE script_status ADD COLUMN {column} {ddl}")
+
+        # Normalise legacy NULLs left behind by ALTER TABLE defaults.
+        conn.execute("UPDATE script_metadata SET safety = 'green' WHERE safety IS NULL OR safety = ''")
+        conn.execute("UPDATE script_metadata SET retired = 0 WHERE retired IS NULL")
+        conn.execute("UPDATE script_metadata SET expires_at = '' WHERE expires_at IS NULL")
+        conn.execute("UPDATE script_metadata SET retired_reason = '' WHERE retired_reason IS NULL")
+        conn.execute("UPDATE script_status SET last_trigger = '' WHERE last_trigger IS NULL")
+
+
+def sync_scripts_on_disk() -> None:
+    """Ensure every runnable file in SCRIPT_DIR has a metadata row."""
+    if not SCRIPT_DIR.is_dir():
+        return
+    names = [p.name for p in SCRIPT_DIR.iterdir() if p.is_file() and p.suffix in (".py", ".sh")]
+    if not names:
+        return
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO script_metadata (script_name) VALUES (?)",
+            [(name,) for name in names],
+        )
+
+
+def _schedule_snapshot() -> dict[str, tuple]:
+    with sqlite3.connect(DB_FILE) as conn:
+        rows = conn.execute(
+            "SELECT script_name, schedule, expires_at, retired FROM script_metadata"
+        ).fetchall()
+    return {
+        row[0]: ((row[1] or "").strip(), row[2] or "", int(row[3] or 0))
+        for row in rows
+    }
+
+
+def expire_stale_nudges() -> list[str]:
+    """Retire scheduled nudges whose expires_at date has passed."""
+    today = date.today().isoformat()
+    retired_now = []
+    with sqlite3.connect(DB_FILE) as conn:
+        rows = conn.execute(
+            "SELECT script_name, schedule, expires_at, retired FROM script_metadata"
+        ).fetchall()
+        for script_name, schedule, expires_at, retired in rows:
+            expires_at = (expires_at or "").strip()
+            if not expires_at or not (schedule or "").strip() or int(retired or 0):
+                continue
+            if today > expires_at[:10]:
+                conn.execute(
+                    "UPDATE script_metadata SET schedule = '', retired = 1, retired_reason = ? "
+                    "WHERE script_name = ?",
+                    (f"expired {expires_at[:10]}", script_name),
+                )
+                retired_now.append(script_name)
+    return retired_now
+
+
+def check_schedule_drift() -> bool:
+    """Reconcile APScheduler with the DB, including edits made outside the app."""
+    sync_scripts_on_disk()
+    expired = expire_stale_nudges()
+    snapshot = _schedule_snapshot()
+    with _schedule_lock:
+        changed = snapshot != _active_schedule_map
+    if changed or expired:
+        refresh_scheduler_jobs()
+        return True
+    return False
+
+
+def _drift_watchdog(stop_event: threading.Event) -> None:
+    while not stop_event.wait(15):
+        try:
+            check_schedule_drift()
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"Schedule drift check failed: {exc}")
 
 
 @app.on_event("startup")
 async def startup_event():
     init_db()
+    sync_scripts_on_disk()
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute("UPDATE script_status SET last_status = 'stopped', pid = NULL WHERE last_status = 'running'")
     if scheduler:
         scheduler.start()
         refresh_scheduler_jobs()
+    global _drift_thread_started
+    if not _drift_thread_started:
+        _drift_thread_started = True
+        stop_event = threading.Event()
+        threading.Thread(
+            target=_drift_watchdog, args=(stop_event,), daemon=True, name="scriptrr-drift"
+        ).start()
 
 
 @app.on_event("shutdown")
@@ -134,18 +261,34 @@ async def shutdown_event():
 
 
 
+STATUS_FIELDS = ("last_run", "last_status", "pid", "exit_code", "last_duration", "last_trigger")
+
+
 def update_script_status(script_name: str, status_data: dict) -> None:
+    """Upsert the provided status fields, preserving the ones not supplied."""
+    current = get_script_status(script_name)
+    merged = {field: current.get(field) for field in STATUS_FIELDS}
+    merged.update({key: value for key, value in status_data.items() if key in STATUS_FIELDS})
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute("""
-            INSERT INTO script_status (script_name, last_run, last_status, pid, exit_code)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO script_status (script_name, last_run, last_status, pid, exit_code, last_duration, last_trigger)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(script_name) DO UPDATE SET
                 last_run=excluded.last_run,
                 last_status=excluded.last_status,
                 pid=excluded.pid,
-                exit_code=excluded.exit_code
-        """, (script_name, status_data.get('last_run'), status_data.get('last_status'), 
-              status_data.get('pid'), status_data.get('exit_code')))
+                exit_code=excluded.exit_code,
+                last_duration=excluded.last_duration,
+                last_trigger=excluded.last_trigger
+        """, (
+            script_name,
+            merged["last_run"],
+            merged["last_status"],
+            merged["pid"],
+            merged["exit_code"],
+            merged["last_duration"],
+            merged["last_trigger"],
+        ))
 
 def get_all_script_metadata() -> dict:
     with sqlite3.connect(DB_FILE) as conn:
@@ -159,8 +302,8 @@ def get_script_metadata(script_name: str) -> dict:
         row = conn.execute("SELECT * FROM script_metadata WHERE script_name = ?", (script_name,)).fetchone()
         return dict(row) if row else {}
 
-def set_script_metadata_field(script_name: str, field: str, value: str):
-    allowed_fields = {"description", "tags", "default_args", "schedule", "starred"}
+def set_script_metadata_field(script_name: str, field: str, value):
+    allowed_fields = set(METADATA_FIELDS)
     if field not in allowed_fields:
         return
     with sqlite3.connect(DB_FILE) as conn:
@@ -186,7 +329,35 @@ def get_all_script_statuses() -> dict:
         return {row["script_name"]: dict(row) for row in rows}
 
 
-def launch_script(script: str, args: str = ""):
+def retire_script(script: str, reason: str) -> dict:
+    """Close out a standing intention: clear cron, mark retired, record why."""
+    set_script_metadata_field(script, "schedule", "")
+    set_script_metadata_field(script, "retired", 1)
+    set_script_metadata_field(script, "retired_reason", reason or "retired")
+    refresh_scheduler_jobs()
+    return get_script_metadata(script)
+
+
+def read_log_tail(script: str, lines: int = 100) -> str:
+    log_path = LOG_DIR / f"{script}.log"
+    if not log_path.is_file():
+        return ""
+    try:
+        with log_path.open("r", errors="replace") as fh:
+            return "".join(deque(fh, maxlen=max(1, int(lines))))
+    except OSError:
+        return ""
+
+
+def _has_pep723_header(script_path: Path) -> bool:
+    try:
+        with script_path.open("rb") as fh:
+            return b"# /// script" in fh.read(4096)
+    except OSError:
+        return False
+
+
+def launch_script(script: str, args: str = "", trigger: str = "manual"):
     """Start a script and attach the same status/log watcher used by the UI."""
     script = safe_script_name(script)
     script_path = SCRIPT_DIR / script
@@ -209,7 +380,13 @@ def launch_script(script: str, args: str = ""):
             pass
 
     logfile = log_path.open("w")
-    cmd = ["python3", "-u", str(script_path)] if script.endswith(".py") else ["bash", str(script_path)]
+    if script.endswith(".py"):
+        if _has_pep723_header(script_path) and shutil.which("uv"):
+            cmd = ["uv", "run", "--script", str(script_path)]
+        else:
+            cmd = ["python3", "-u", str(script_path)]
+    else:
+        cmd = ["bash", str(script_path)]
     if args:
         try:
             cmd.extend(shlex.split(args))
@@ -217,6 +394,14 @@ def launch_script(script: str, args: str = ""):
             logfile.close()
             raise HTTPException(status_code=400, detail=f"Invalid arguments: {exc}")
 
+    child_env = os.environ.copy()
+    child_env.update({
+        "SCRIPTRR_API": os.environ.get("SCRIPTRR_API", "http://127.0.0.1:8000"),
+        "SCRIPTRR_SCRIPT": script,
+        "SCRIPTRR_TRIGGER": trigger,
+    })
+
+    start_time = time.time()
     kwargs = {"start_new_session": True} if os.name == "posix" else {}
     try:
         proc = subprocess.Popen(
@@ -225,6 +410,7 @@ def launch_script(script: str, args: str = ""):
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=child_env,
             **kwargs,
         )
     except OSError:
@@ -235,23 +421,37 @@ def launch_script(script: str, args: str = ""):
     update_script_status(script, {
         "last_status": "running",
         "pid": proc.pid,
-        "last_run": time.time(),
+        "last_run": start_time,
         "exit_code": None,
+        "last_duration": None,
+        "last_trigger": trigger,
     })
 
     def watcher_task():
         proc.wait()
         logfile.close()
+        duration = round(time.time() - start_time, 3)
         current_status = get_script_status(script)
         if current_status.get("last_status") == "stopped":
             _running_processes.pop(script, None)
             return
+        returncode = proc.returncode
+        final_status = "success" if returncode in (0, 42) else "fail"
         update_script_status(script, {
-            "last_status": "success" if proc.returncode == 0 else "fail",
+            "last_status": final_status,
             "pid": None,
-            "last_run": time.time(),
-            "exit_code": proc.returncode,
+            "last_run": start_time,
+            "exit_code": returncode,
+            "last_duration": duration,
+            "last_trigger": trigger,
         })
+        if returncode == 42:
+            metadata = get_script_metadata(script)
+            if not int(metadata.get("retired") or 0):
+                set_script_metadata_field(script, "schedule", "")
+                set_script_metadata_field(script, "retired", 1)
+                set_script_metadata_field(script, "retired_reason", "self-retired (exit 42)")
+                refresh_scheduler_jobs()
         _running_processes.pop(script, None)
 
     threading.Thread(target=watcher_task, daemon=True, name=f"scriptrr-{script}").start()
@@ -262,7 +462,9 @@ def run_scheduled_script(script: str) -> None:
     """APScheduler callback; skips overlapping executions and records failures."""
     try:
         metadata = get_script_metadata(script)
-        launch_script(script, metadata.get("default_args", "").strip())
+        if int(metadata.get("retired") or 0):
+            return
+        launch_script(script, metadata.get("default_args", "").strip(), trigger="schedule")
     except HTTPException as exc:
         if exc.status_code != 409:
             print(f"Scheduled run failed for {script}: {exc.detail}")
@@ -272,13 +474,18 @@ def run_scheduled_script(script: str) -> None:
 
 def refresh_scheduler_jobs() -> None:
     """Rebuild scheduled jobs from the database after startup or schedule edits."""
+    global _active_schedule_map
     if not scheduler or not CronTrigger or not scheduler.running:
         return
 
     scheduler.remove_all_jobs()
+    snapshot: dict[str, tuple] = {}
     for script, metadata in get_all_script_metadata().items():
         schedule = (metadata.get("schedule") or "").strip()
-        if not schedule or not (SCRIPT_DIR / script).is_file():
+        expires_at = (metadata.get("expires_at") or "").strip()
+        retired = int(metadata.get("retired") or 0)
+        snapshot[script] = (schedule, expires_at, retired)
+        if not schedule or retired or not (SCRIPT_DIR / script).is_file():
             continue
         try:
             trigger = CronTrigger.from_crontab(schedule)
@@ -294,6 +501,8 @@ def refresh_scheduler_jobs() -> None:
             )
         except Exception as exc:
             print(f"Failed to schedule {script} with schedule '{schedule}': {exc}")
+    with _schedule_lock:
+        _active_schedule_map = snapshot
 
 
 def resolve_status(entry: dict) -> str:
@@ -339,6 +548,7 @@ def next_run_info(schedule: str) -> tuple[str, float]:
 
 
 def get_combined_data(search_query: str = "", sort_by: str = "name", order: str = "asc") -> list[dict]:
+    sync_scripts_on_disk()
     scripts = sorted([p.name for p in SCRIPT_DIR.iterdir() if p.is_file() and p.suffix in (".py", ".sh")])
     statuses = get_all_script_statuses()
     metadata_all = get_all_script_metadata()
@@ -380,9 +590,16 @@ def get_combined_data(search_query: str = "", sort_by: str = "name", order: str 
             "status": resolve_status(entry),
             "next_run": next_run_str,
             "next_run_ts": next_run_ts,
-            "schedule_raw": schedule, # ADD THIS LINE
+            "schedule_raw": schedule,
             "default_args": meta.get("default_args", ""),
             "starred": bool(meta.get("starred", 0)),
+            "safety": (meta.get("safety") or "green").strip() or "green",
+            "expires_at": (meta.get("expires_at") or "").strip(),
+            "retired": bool(meta.get("retired") or 0),
+            "retired_reason": meta.get("retired_reason") or "",
+            "last_duration": entry.get("last_duration"),
+            "last_trigger": entry.get("last_trigger") or "",
+            "exit_code": entry.get("exit_code"),
         })
 
     reverse = order == "desc"
@@ -400,6 +617,627 @@ def get_combined_data(search_query: str = "", sort_by: str = "name", order: str 
 
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent-native surface: REST JSON API (/api/v1) + built-in MCP server (/mcp)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _normalise_status(entry: dict) -> str:
+    resolved = resolve_status(entry)
+    return "idle" if resolved == "unknown" else resolved
+
+
+def script_object(name: str) -> dict:
+    """Canonical JSON representation of one script (metadata + latest run)."""
+    metadata = get_script_metadata(name)
+    entry = get_script_status(name)
+    schedule = (metadata.get("schedule") or "").strip()
+    tags_raw = metadata.get("tags") or ""
+    tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+    last_run = entry.get("last_run")
+    next_run_str, next_run_ts = next_run_info(schedule)
+    return {
+        "name": name,
+        "type": "python" if name.endswith(".py") else "bash",
+        "description": metadata.get("description") or "",
+        "tags": tags,
+        "safety": (metadata.get("safety") or "green").strip() or "green",
+        "schedule": schedule,
+        "default_args": metadata.get("default_args") or "",
+        "starred": bool(metadata.get("starred") or 0),
+        "retired": bool(metadata.get("retired") or 0),
+        "retired_reason": metadata.get("retired_reason") or "",
+        "expires_at": (metadata.get("expires_at") or "").strip(),
+        "status": _normalise_status(entry),
+        "last_run_ts": last_run or None,
+        "last_run_relative": get_relative_time(last_run) if last_run else "Never",
+        "last_duration": entry.get("last_duration"),
+        "last_trigger": entry.get("last_trigger") or "",
+        "exit_code": entry.get("exit_code"),
+        "next_run_ts": next_run_ts if next_run_ts != float("inf") else None,
+        "next_run_relative": next_run_str or "Not scheduled",
+    }
+
+
+def list_script_objects(safety: str = "", tag: str = "", status: str = "",
+                        scheduled: bool | None = None, include_retired: bool = False,
+                        q: str = "") -> list[dict]:
+    sync_scripts_on_disk()
+    names = sorted(p.name for p in SCRIPT_DIR.iterdir() if p.is_file() and p.suffix in (".py", ".sh"))
+    safety = (safety or "").strip().lower()
+    tag = (tag or "").strip().lower()
+    status = (status or "").strip().lower()
+    q = (q or "").strip().casefold()
+    results = []
+    for name in names:
+        obj = script_object(name)
+        if not include_retired and obj["retired"]:
+            continue
+        if safety and obj["safety"] != safety:
+            continue
+        if tag and tag not in [t.lower() for t in obj["tags"]]:
+            continue
+        if status and obj["status"] != status:
+            continue
+        if scheduled is not None and bool(obj["schedule"]) != scheduled:
+            continue
+        if q and q not in " ".join([name, obj["description"], " ".join(obj["tags"])]).casefold():
+            continue
+        results.append(obj)
+    return results
+
+
+def _require_api_token(request: Request) -> None:
+    """Optional Bearer auth; open by default for trusted-LAN use."""
+    expected = os.environ.get("SCRIPTRR_API_TOKEN", "").strip()
+    if not expected:
+        return
+    supplied = request.headers.get("authorization", "")
+    token = supplied[7:] if supplied.lower().startswith("bearer ") else request.query_params.get("token", "")
+    if token != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing API token")
+
+
+async def _json_body(request: Request) -> dict:
+    raw = await request.body()
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {exc}")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON body must be an object")
+    return payload
+
+
+def _coerce_tags(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v).strip() for v in value if str(v).strip())
+    return ", ".join(part.strip() for part in str(value).split(",") if part.strip())
+
+
+def _validate_schedule(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if not CronTrigger:
+        raise HTTPException(status_code=503, detail="Scheduling support is unavailable")
+    try:
+        CronTrigger.from_crontab(value)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid cron schedule: {exc}")
+    return value
+
+
+def _validate_expires_at(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        datetime.strptime(value[:10], "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="expires_at must be YYYY-MM-DD")
+    return value[:10]
+
+
+def _validate_safety(value, default: str = "green") -> str:
+    value = (str(value).strip().lower() if value is not None else default)
+    if value not in SAFETY_TIERS:
+        raise HTTPException(status_code=400, detail=f"safety must be one of {', '.join(SAFETY_TIERS)}")
+    return value
+
+
+def apply_script_updates(script: str, payload: dict, create: bool = False) -> dict:
+    """Write content and/or metadata for a script, then sync the scheduler."""
+    script = safe_script_name(script)
+    script_path = SCRIPT_DIR / script
+    content = payload.get("content")
+    if create and content is None and not script_path.exists():
+        raise HTTPException(status_code=400, detail="content is required to create a new script")
+    if content is not None:
+        if not content.endswith("\n"):
+            content += "\n"
+        script_path.write_text(content.replace("\r\n", "\n"), encoding="utf-8", newline="\n")
+        try:
+            script_path.chmod(0o755)
+        except OSError:
+            pass
+
+    if payload.get("description") is not None:
+        set_script_metadata_field(script, "description", str(payload["description"]).strip())
+    if payload.get("tags") is not None:
+        set_script_metadata_field(script, "tags", _coerce_tags(payload["tags"]))
+    if payload.get("default_args") is not None:
+        set_script_metadata_field(script, "default_args", str(payload["default_args"]).strip())
+    if payload.get("safety") is not None:
+        set_script_metadata_field(script, "safety", _validate_safety(payload["safety"]))
+    if payload.get("schedule") is not None:
+        set_script_metadata_field(script, "schedule", _validate_schedule(str(payload["schedule"])))
+    if payload.get("expires_at") is not None:
+        set_script_metadata_field(script, "expires_at", _validate_expires_at(str(payload["expires_at"])))
+    if payload.get("retired") is not None:
+        set_script_metadata_field(script, "retired", 1 if payload["retired"] else 0)
+    if payload.get("retired_reason") is not None:
+        set_script_metadata_field(script, "retired_reason", str(payload["retired_reason"]))
+    if payload.get("starred") is not None:
+        set_script_metadata_field(script, "starred", 1 if payload["starred"] else 0)
+
+    if not script_path.exists():
+        raise HTTPException(status_code=404, detail="Script not found")
+    refresh_scheduler_jobs()
+    return script_object(script)
+
+
+CAUTIOUS_BLOCK_MESSAGE = (
+    "Script is marked 'cautious' (mutates data). Pass confirm_cautious=true after "
+    "operator approval, or run with --dry-run."
+)
+
+
+def cautious_blocked(metadata: dict, args: str, confirm_cautious: bool) -> bool:
+    if (metadata.get("safety") or "green") != "cautious":
+        return False
+    if confirm_cautious:
+        return False
+    return "--dry-run" not in (args or "")
+
+
+async def execute_run(script: str, payload: dict) -> dict:
+    """Launch a script and optionally wait for it, returning a JSON-friendly result."""
+    script = safe_script_name(script)
+    if not (SCRIPT_DIR / script).is_file():
+        raise HTTPException(status_code=404, detail="Script not found")
+    metadata = get_script_metadata(script)
+    args = payload.get("args")
+    if args is None:
+        args = metadata.get("default_args", "")
+    args = str(args).strip()
+    wait = bool(payload.get("wait", True))
+    try:
+        timeout = max(1, int(payload.get("timeout") or 60))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="timeout must be an integer number of seconds")
+    trigger = str(payload.get("trigger") or "agent").strip().lower()
+    if trigger not in ("agent", "manual", "schedule"):
+        trigger = "agent"
+
+    proc = launch_script(script, args, trigger=trigger)
+    result = {"script": script, "pid": proc.pid, "args": args, "trigger": trigger}
+
+    if not wait:
+        result.update({"status": "running", "message": "Started in background"})
+        return result
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and proc.poll() is None:
+        await asyncio.sleep(0.2)
+    if proc.poll() is None:
+        result.update({"status": "running", "pid": proc.pid, "message": "Still running in background"})
+        return result
+
+    for _ in range(40):
+        entry = get_script_status(script)
+        if entry.get("last_status") != "running":
+            break
+        await asyncio.sleep(0.1)
+    entry = get_script_status(script)
+    result.update({
+        "status": _normalise_status(entry),
+        "exit_code": entry.get("exit_code"),
+        "duration": entry.get("last_duration"),
+        "log_tail": read_log_tail(script, 60),
+    })
+    return result
+
+
+@app.get("/api/v1/health")
+async def api_v1_health():
+    return JSONResponse({"status": "ok", "name": "scriptrr", "version": VERSION})
+
+
+@app.get("/api/v1/scripts")
+async def api_v1_list_scripts(
+    request: Request,
+    safety: str = "",
+    tag: str = "",
+    status: str = "",
+    scheduled: bool | None = None,
+    include_retired: bool = False,
+    q: str = "",
+):
+    _require_api_token(request)
+    check_schedule_drift()
+    return JSONResponse(list_script_objects(
+        safety=safety, tag=tag, status=status, scheduled=scheduled,
+        include_retired=include_retired, q=q,
+    ))
+
+
+@app.get("/api/v1/scripts/{script}")
+async def api_v1_get_script(
+    script: str,
+    request: Request,
+    include_content: bool = False,
+    log_lines: int = 100,
+):
+    _require_api_token(request)
+    script = safe_script_name(script)
+    if not (SCRIPT_DIR / script).is_file():
+        raise HTTPException(status_code=404, detail="Script not found")
+    obj = script_object(script)
+    if include_content:
+        obj["content"] = (SCRIPT_DIR / script).read_text(encoding="utf-8", errors="replace")
+    obj["log_tail"] = read_log_tail(script, max(1, min(log_lines, 5000)))
+    return JSONResponse(obj)
+
+
+@app.post("/api/v1/scripts", status_code=201)
+async def api_v1_create_script(request: Request):
+    _require_api_token(request)
+    payload = await _json_body(request)
+    name = str(payload.get("name") or payload.get("script") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    created = not (SCRIPT_DIR / name).exists()
+    obj = apply_script_updates(name, payload, create=True)
+    return JSONResponse(obj, status_code=201 if created else 200)
+
+
+@app.put("/api/v1/scripts/{script}")
+async def api_v1_put_script(script: str, request: Request):
+    _require_api_token(request)
+    payload = await _json_body(request)
+    return JSONResponse(apply_script_updates(script, payload, create=True))
+
+
+@app.patch("/api/v1/scripts/{script}")
+async def api_v1_patch_script(script: str, request: Request):
+    _require_api_token(request)
+    payload = await _json_body(request)
+    return JSONResponse(apply_script_updates(script, payload))
+
+
+@app.post("/api/v1/scripts/{script}/run")
+async def api_v1_run_script(script: str, request: Request):
+    _require_api_token(request)
+    script = safe_script_name(script)
+    payload = await _json_body(request)
+    metadata = get_script_metadata(script)
+    if not (SCRIPT_DIR / script).is_file():
+        raise HTTPException(status_code=404, detail="Script not found")
+    args = payload.get("args")
+    effective_args = str(metadata.get("default_args", "")) if args is None else str(args)
+    if cautious_blocked(metadata, effective_args, bool(payload.get("confirm_cautious", False))):
+        return JSONResponse(
+            status_code=409,
+            content={"error": "cautious_script", "message": CAUTIOUS_BLOCK_MESSAGE},
+        )
+    return JSONResponse(await execute_run(script, payload))
+
+
+@app.post("/api/v1/scripts/{script}/stop")
+async def api_v1_stop_script(script: str, request: Request):
+    _require_api_token(request)
+    script = safe_script_name(script)
+    if not (SCRIPT_DIR / script).is_file():
+        raise HTTPException(status_code=404, detail="Script not found")
+    await stop_script(script)
+    return JSONResponse(script_object(script))
+
+
+@app.post("/api/v1/scripts/{script}/retire")
+async def api_v1_retire_script(script: str, request: Request):
+    _require_api_token(request)
+    script = safe_script_name(script)
+    payload = await _json_body(request)
+    if not (SCRIPT_DIR / script).is_file():
+        raise HTTPException(status_code=404, detail="Script not found")
+    reason = str(payload.get("reason") or "retired").strip() or "retired"
+    retire_script(script, reason)
+    return JSONResponse(script_object(script))
+
+
+@app.get("/api/v1/scripts/{script}/log")
+async def api_v1_script_log(script: str, request: Request, tail: int = 200):
+    _require_api_token(request)
+    script = safe_script_name(script)
+    if not (SCRIPT_DIR / script).is_file():
+        raise HTTPException(status_code=404, detail="Script not found")
+    return JSONResponse({"script": script, "log": read_log_tail(script, max(1, min(tail, 5000)))})
+
+
+# ── MCP server (Streamable HTTP, JSON-RPC 2.0) ──────────────────────────────
+
+MCP_TOOLS = [
+    {
+        "name": "scriptrr_list_scripts",
+        "description": (
+            "List scripts in Scriptrr with their purpose, safety tier (green = run freely, "
+            "cautious = ask human first, helper = utility), schedule, last run "
+            "status/duration/trigger, and expiry. Use this to answer 'what should we run now' "
+            "or check standing jobs."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "safety": {"type": "string", "enum": list(SAFETY_TIERS)},
+                "tag": {"type": "string"},
+                "scheduled_only": {"type": "boolean"},
+                "include_retired": {"type": "boolean", "default": False},
+                "search": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "scriptrr_get_script",
+        "description": "Read a script's metadata, latest run log tail, and optionally its source code.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "script": {"type": "string"},
+                "include_content": {"type": "boolean", "default": False},
+                "log_lines": {"type": "integer", "default": 100},
+            },
+            "required": ["script"],
+        },
+    },
+    {
+        "name": "scriptrr_run_script",
+        "description": (
+            "Run a script through Scriptrr so its execution, duration, exit code, and output "
+            "log are captured on the dashboard (trigger='agent'). Enforces safety tiers: "
+            "cautious scripts require confirm_cautious=true (only after explicit human "
+            "approval) unless --dry-run is passed in args."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "script": {"type": "string"},
+                "args": {"type": "string"},
+                "wait": {"type": "boolean", "default": True},
+                "timeout": {"type": "integer", "default": 60},
+                "confirm_cautious": {"type": "boolean", "default": False},
+            },
+            "required": ["script"],
+        },
+    },
+    {
+        "name": "scriptrr_upsert_script",
+        "description": (
+            "Create a new script or update an existing script's metadata (description, tags, "
+            "safety, default_args, schedule, expires_at) and/or source content, immediately "
+            "syncing the live cron scheduler."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "script": {"type": "string"},
+                "description": {"type": "string"},
+                "tags": {"type": "string"},
+                "safety": {"type": "string", "enum": list(SAFETY_TIERS)},
+                "default_args": {"type": "string"},
+                "schedule": {"type": "string"},
+                "expires_at": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["script"],
+        },
+    },
+    {
+        "name": "scriptrr_retire_script",
+        "description": (
+            "Retire a standing-intention / nudge script (retired=true), clearing its cron "
+            "schedule and recording reason."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "script": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["script", "reason"],
+        },
+    },
+]
+
+
+def _mcp_content(payload, is_error: bool = False) -> dict:
+    return {
+        "content": [{"type": "text", "text": json.dumps(payload, indent=2, default=str)}],
+        "isError": is_error,
+    }
+
+
+def _mcp_error(request_id, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+def _mcp_require(arguments: dict, key: str) -> str:
+    value = arguments.get(key)
+    if value is None or str(value).strip() == "":
+        raise ValueError(f"'{key}' is required")
+    return str(value)
+
+
+async def _mcp_call_tool(name: str, arguments: dict) -> dict:
+    arguments = arguments or {}
+    if name == "scriptrr_list_scripts":
+        objects = list_script_objects(
+            safety=arguments.get("safety", ""),
+            tag=arguments.get("tag", ""),
+            scheduled=True if arguments.get("scheduled_only") else None,
+            include_retired=bool(arguments.get("include_retired", False)),
+            q=arguments.get("search", ""),
+        )
+        return _mcp_content({"count": len(objects), "scripts": objects})
+
+    if name == "scriptrr_get_script":
+        script = safe_script_name(_mcp_require(arguments, "script"))
+        if not (SCRIPT_DIR / script).is_file():
+            return _mcp_content({"error": "script_not_found", "script": script}, is_error=True)
+        obj = script_object(script)
+        if arguments.get("include_content"):
+            obj["content"] = (SCRIPT_DIR / script).read_text(encoding="utf-8", errors="replace")
+        obj["log_tail"] = read_log_tail(script, int(arguments.get("log_lines") or 100))
+        return _mcp_content(obj)
+
+    if name == "scriptrr_run_script":
+        script = safe_script_name(_mcp_require(arguments, "script"))
+        if not (SCRIPT_DIR / script).is_file():
+            return _mcp_content({"error": "script_not_found", "script": script}, is_error=True)
+        metadata = get_script_metadata(script)
+        args = arguments.get("args")
+        effective_args = str(metadata.get("default_args", "")) if args is None else str(args)
+        if cautious_blocked(metadata, effective_args, bool(arguments.get("confirm_cautious", False))):
+            return _mcp_content(
+                {"error": "cautious_script", "script": script, "message": CAUTIOUS_BLOCK_MESSAGE},
+                is_error=True,
+            )
+        try:
+            result = await execute_run(script, {
+                "args": args,
+                "wait": arguments.get("wait", True),
+                "timeout": arguments.get("timeout", 60),
+                "confirm_cautious": arguments.get("confirm_cautious", False),
+                "trigger": "agent",
+            })
+        except HTTPException as exc:
+            return _mcp_content({"error": "run_failed", "message": str(exc.detail)}, is_error=True)
+        return _mcp_content(result)
+
+    if name == "scriptrr_upsert_script":
+        script = _mcp_require(arguments, "script")
+        try:
+            obj = apply_script_updates(script, arguments, create=True)
+        except HTTPException as exc:
+            return _mcp_content({"error": "upsert_failed", "message": str(exc.detail)}, is_error=True)
+        return _mcp_content(obj)
+
+    if name == "scriptrr_retire_script":
+        script = safe_script_name(_mcp_require(arguments, "script"))
+        reason = _mcp_require(arguments, "reason")
+        if not (SCRIPT_DIR / script).is_file():
+            return _mcp_content({"error": "script_not_found", "script": script}, is_error=True)
+        retire_script(script, reason)
+        return _mcp_content(script_object(script))
+
+    return _mcp_content({"error": "unknown_tool", "tool": name}, is_error=True)
+
+
+@app.post("/mcp")
+async def mcp_endpoint(request: Request):
+    _require_api_token(request)
+    raw = await request.body()
+    if not raw:
+        return JSONResponse(_mcp_error(None, -32600, "Empty request body"), status_code=400)
+    try:
+        message = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return JSONResponse(_mcp_error(None, -32700, f"Parse error: {exc}"), status_code=400)
+
+    if isinstance(message, list):
+        if not message:
+            return JSONResponse(_mcp_error(None, -32600, "Empty batch"), status_code=400)
+        responses = []
+        for item in message:
+            response = await _mcp_handle_message(item)
+            if response is not None:
+                responses.append(response)
+        if not responses:
+            return Response(status_code=202)
+        return JSONResponse(responses)
+
+    response = await _mcp_handle_message(message)
+    if response is None:
+        return Response(status_code=202)
+    return JSONResponse(response)
+
+
+async def _mcp_handle_message(message: dict):
+    if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+        return _mcp_error(message.get("id") if isinstance(message, dict) else None, -32600, "Invalid Request")
+
+    method = message.get("method", "")
+    request_id = message.get("id")
+    params = message.get("params") or {}
+    is_notification = "id" not in message
+
+    if method == "initialize":
+        requested = params.get("protocolVersion", MCP_PROTOCOL_VERSIONS[-1])
+        protocol = requested if requested in MCP_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSIONS[-1]
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "protocolVersion": protocol,
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": "scriptrr", "version": VERSION},
+                "instructions": (
+                    "Scriptrr runs and remembers plain .py/.sh scripts on disk. "
+                    "Check 'safety' before running: green = run freely, cautious = ask the "
+                    "human first, helper = utility not meant for standalone runs."
+                ),
+            },
+        }
+
+    if method in ("notifications/initialized", "notifications/cancelled"):
+        return None
+
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": request_id, "result": {}}
+
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": MCP_TOOLS}}
+
+    if method == "tools/call":
+        tool_name = params.get("name", "")
+        arguments = params.get("arguments") or {}
+        known = {tool["name"] for tool in MCP_TOOLS}
+        if tool_name not in known:
+            return _mcp_error(request_id, -32602, f"Unknown tool: {tool_name}")
+        try:
+            result = await _mcp_call_tool(tool_name, arguments)
+        except ValueError as exc:
+            return _mcp_error(request_id, -32602, str(exc))
+        except HTTPException as exc:
+            return _mcp_error(request_id, -32602, str(exc.detail))
+        except Exception as exc:  # pragma: no cover - defensive
+            return _mcp_error(request_id, -32603, f"Tool execution failed: {exc}")
+        return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+    if is_notification:
+        return None
+    return _mcp_error(request_id, -32601, f"Method not found: {method}")
+
+
+@app.get("/mcp")
+async def mcp_get():
+    # Streamable HTTP allows a server to refuse the optional SSE stream.
+    return Response(status_code=405, headers={"Allow": "POST"})
 
 
 @app.get("/", include_in_schema=False)
@@ -459,6 +1297,7 @@ async def api_statuses():
 async def create_script(
     filename: str = Form(...),
     description: str = Form(""),
+    safety: str = Form("green"),
     content: str = Form(...)
 ):
     filename = safe_script_name(filename)
@@ -467,6 +1306,10 @@ async def create_script(
     
     if description:
         set_script_metadata_field(filename, "description", description)
+    try:
+        set_script_metadata_field(filename, "safety", _validate_safety(safety))
+    except HTTPException:
+        set_script_metadata_field(filename, "safety", "green")
         
     return HTMLResponse(render_dashboard(get_combined_data(), partial_only=True))
 
@@ -492,6 +1335,7 @@ async def api_search_rows(request: Request):
 async def save_schedule(script: str, request: Request):
     script = safe_script_name(script)
     new_schedule = (await form_value(request, "schedule")).strip()
+    expires_at = (await form_value(request, "expires_at")).strip()
 
     if new_schedule:
         if not CronTrigger:
@@ -501,10 +1345,26 @@ async def save_schedule(script: str, request: Request):
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Invalid cron schedule: {exc}")
 
+    if expires_at:
+        expires_at = _validate_expires_at(expires_at)
+
     set_script_metadata_field(script, "schedule", new_schedule)
+    set_script_metadata_field(script, "expires_at", expires_at)
+    if new_schedule and get_script_metadata(script).get("retired"):
+        # Re-arming a retired nudge clears the retirement state.
+        set_script_metadata_field(script, "retired", 0)
+        set_script_metadata_field(script, "retired_reason", "")
     refresh_scheduler_jobs()
     
     # Render the entire table partial so the "Next Run" column updates immediately
+    return HTMLResponse(render_dashboard(get_combined_data(), partial_only=True))
+
+
+@app.post("/v2/api/script/{script}/retire", response_class=HTMLResponse)
+async def ui_retire_script(script: str, request: Request):
+    script = safe_script_name(script)
+    reason = (await form_value(request, "reason", "retired via flight deck")).strip() or "retired via flight deck"
+    retire_script(script, reason)
     return HTMLResponse(render_dashboard(get_combined_data(), partial_only=True))
 
 
@@ -719,6 +1579,7 @@ async def save_script(script: str, request: Request):
     new_name = (await form_value(request, "name")).strip() or original
     new_description = (await form_value(request, "description")).strip()
     new_tags = (await form_value(request, "tags")).strip()
+    new_safety = (await form_value(request, "safety")).strip()
     new_content = (await form_value(request, "content"))
 
     # Validate new name; if invalid, keep original
@@ -747,7 +1608,7 @@ async def save_script(script: str, request: Request):
         with sqlite3.connect(DB_FILE) as conn:
             conn.execute("DELETE FROM script_metadata WHERE script_name = ?", (original,))
             conn.execute("DELETE FROM script_status WHERE script_name = ?", (original,))
-        for field in ("default_args", "schedule", "starred"):
+        for field in ("default_args", "schedule", "starred", "safety", "expires_at", "retired", "retired_reason"):
             if field in original_metadata:
                 set_script_metadata_field(new_name, field, original_metadata[field])
         if original_status:
@@ -765,6 +1626,8 @@ async def save_script(script: str, request: Request):
     # Persist metadata fields
     set_script_metadata_field(new_name, "description", new_description)
     set_script_metadata_field(new_name, "tags", new_tags)
+    if new_safety:
+        set_script_metadata_field(new_name, "safety", _validate_safety(new_safety))
     refresh_scheduler_jobs()
 
     # Return refreshed partial
