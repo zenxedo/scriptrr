@@ -138,8 +138,10 @@ Example — an agent checking what it may run on its own:
 curl -s 'http://scriptrr:8000/api/v1/scripts?safety=green&scheduled=true' | jq '.[].name'
 ```
 
-Set `SCRIPTRR_API_TOKEN` to require a `Bearer` token (off by default — the app is
-a trusted-LAN tool).
+Set `SCRIPTRR_API_TOKEN` to require a `Bearer` token on the agent surface
+(`/api/v1`, `/mcp`); it is off by default because the app is a trusted-LAN tool.
+The browser UI (`/v2/*`) is not behind that token — protect it with your reverse
+proxy.
 
 ## Standing intentions that close themselves out
 

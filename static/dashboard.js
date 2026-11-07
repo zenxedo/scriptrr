@@ -354,6 +354,14 @@ async function pollStatuses() {
           const prevText = el.textContent.trim();
           el.innerHTML = statuses[name];
           const newText = el.textContent.trim();
+
+          // Keep the row's data-status in sync so the "Failing" pill stays honest.
+          const statusRow = el.closest('tr');
+          if (statusRow) {
+            const mapped = {RUNNING: 'running', PASS: 'pass', FAIL: 'fail', STOPPED: 'stopped', IDLE: 'idle'}[newText];
+            if (mapped) statusRow.dataset.status = mapped;
+            if (activeFilter === 'failing') applyStarFilter();
+          }
           
           if (prevText !== newText) {
             const tr = el.closest('tr');

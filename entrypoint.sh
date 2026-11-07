@@ -7,6 +7,8 @@
 # Both are optional and blank by default, so a plain `docker run` stays fast.
 set -e
 
+export DEBIAN_FRONTEND=noninteractive
+
 if [ -n "$EXTRA_APT_PACKAGES" ] && [ "$(id -u)" = "0" ]; then
     echo "scriptrr: installing apt packages: $EXTRA_APT_PACKAGES"
     apt-get update -qq
@@ -20,7 +22,7 @@ fi
 if [ -n "$EXTRA_PIP_PACKAGES" ]; then
     echo "scriptrr: installing pip packages: $EXTRA_PIP_PACKAGES"
     # shellcheck disable=SC2086
-    python3 -m pip install --no-cache-dir --quiet $EXTRA_PIP_PACKAGES
+    python3 -m pip install --no-cache-dir --quiet --root-user-action=ignore $EXTRA_PIP_PACKAGES
 fi
 
 exec "$@"

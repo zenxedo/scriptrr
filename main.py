@@ -28,7 +28,7 @@ except ImportError:
     CronTrigger = None
 
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 MCP_PROTOCOL_VERSIONS = ("2025-03-26", "2024-11-05")
 
 app = FastAPI(title="Scriptrr v0.2")
@@ -437,6 +437,15 @@ def launch_script(script: str, args: str = "", trigger: str = "manual"):
             return
         returncode = proc.returncode
         final_status = "success" if returncode in (0, 42) else "fail"
+        if returncode == 42:
+            # Commit the retirement metadata before flipping status, so a
+            # caller polling for "not running" also sees the retired fields.
+            metadata = get_script_metadata(script)
+            if not int(metadata.get("retired") or 0):
+                set_script_metadata_field(script, "schedule", "")
+                set_script_metadata_field(script, "retired", 1)
+                set_script_metadata_field(script, "retired_reason", "self-retired (exit 42)")
+                refresh_scheduler_jobs()
         update_script_status(script, {
             "last_status": final_status,
             "pid": None,
@@ -445,13 +454,6 @@ def launch_script(script: str, args: str = "", trigger: str = "manual"):
             "last_duration": duration,
             "last_trigger": trigger,
         })
-        if returncode == 42:
-            metadata = get_script_metadata(script)
-            if not int(metadata.get("retired") or 0):
-                set_script_metadata_field(script, "schedule", "")
-                set_script_metadata_field(script, "retired", 1)
-                set_script_metadata_field(script, "retired_reason", "self-retired (exit 42)")
-                refresh_scheduler_jobs()
         _running_processes.pop(script, None)
 
     threading.Thread(target=watcher_task, daemon=True, name=f"scriptrr-{script}").start()
@@ -461,6 +463,8 @@ def launch_script(script: str, args: str = "", trigger: str = "manual"):
 def run_scheduled_script(script: str) -> None:
     """APScheduler callback; skips overlapping executions and records failures."""
     try:
+        # Catch an expiry that landed between watchdog ticks (e.g. midnight).
+        expire_stale_nudges()
         metadata = get_script_metadata(script)
         if int(metadata.get("retired") or 0):
             return
@@ -576,7 +580,8 @@ def get_combined_data(search_query: str = "", sort_by: str = "name", order: str 
         script_path = SCRIPT_DIR / script
         script_content = script_path.read_text(encoding="utf-8", errors="replace") if script_path.exists() else ""
 
-        next_run_str, next_run_ts = next_run_info(schedule)
+        retired = bool(meta.get("retired") or 0)
+        next_run_str, next_run_ts = ("Not scheduled", float("inf")) if retired else next_run_info(schedule)
 
         combined.append({
             "name": script,
@@ -595,7 +600,7 @@ def get_combined_data(search_query: str = "", sort_by: str = "name", order: str 
             "starred": bool(meta.get("starred", 0)),
             "safety": (meta.get("safety") or "green").strip() or "green",
             "expires_at": (meta.get("expires_at") or "").strip(),
-            "retired": bool(meta.get("retired") or 0),
+            "retired": retired,
             "retired_reason": meta.get("retired_reason") or "",
             "last_duration": entry.get("last_duration"),
             "last_trigger": entry.get("last_trigger") or "",
@@ -636,7 +641,8 @@ def script_object(name: str) -> dict:
     tags_raw = metadata.get("tags") or ""
     tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
     last_run = entry.get("last_run")
-    next_run_str, next_run_ts = next_run_info(schedule)
+    retired = bool(metadata.get("retired") or 0)
+    next_run_str, next_run_ts = ("Not scheduled", float("inf")) if retired else next_run_info(schedule)
     return {
         "name": name,
         "type": "python" if name.endswith(".py") else "bash",
@@ -646,7 +652,7 @@ def script_object(name: str) -> dict:
         "schedule": schedule,
         "default_args": metadata.get("default_args") or "",
         "starred": bool(metadata.get("starred") or 0),
-        "retired": bool(metadata.get("retired") or 0),
+        "retired": retired,
         "retired_reason": metadata.get("retired_reason") or "",
         "expires_at": (metadata.get("expires_at") or "").strip(),
         "status": _normalise_status(entry),
@@ -780,11 +786,19 @@ def apply_script_updates(script: str, payload: dict, create: bool = False) -> di
     if payload.get("expires_at") is not None:
         set_script_metadata_field(script, "expires_at", _validate_expires_at(str(payload["expires_at"])))
     if payload.get("retired") is not None:
-        set_script_metadata_field(script, "retired", 1 if payload["retired"] else 0)
+        set_script_metadata_field(script, "retired", 1 if _as_bool(payload["retired"]) else 0)
     if payload.get("retired_reason") is not None:
         set_script_metadata_field(script, "retired_reason", str(payload["retired_reason"]))
     if payload.get("starred") is not None:
-        set_script_metadata_field(script, "starred", 1 if payload["starred"] else 0)
+        set_script_metadata_field(script, "starred", 1 if _as_bool(payload["starred"]) else 0)
+
+    # Re-arming a retired nudge (setting a cron without explicitly asking to
+    # stay retired) clears the retirement state — same rule as the UI route.
+    if str(payload.get("schedule") or "").strip() and not _as_bool(payload.get("retired")):
+        metadata = get_script_metadata(script)
+        if int(metadata.get("retired") or 0):
+            set_script_metadata_field(script, "retired", 0)
+            set_script_metadata_field(script, "retired_reason", "")
 
     if not script_path.exists():
         raise HTTPException(status_code=404, detail="Script not found")
@@ -798,12 +812,50 @@ CAUTIOUS_BLOCK_MESSAGE = (
 )
 
 
+def _as_bool(value) -> bool:
+    """Lenient boolean coercion: only explicit truthy values count.
+
+    Guards against JSON clients sending "false"/"0"/"no" as strings, which
+    ``bool("false")`` would otherwise treat as True.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
+
+
+def _args_request_dry_run(args: str) -> bool:
+    """True only when args contain an actual dry-run flag (not --dry-run=false)."""
+    try:
+        tokens = shlex.split(args or "")
+    except ValueError:
+        tokens = (args or "").split()
+    for token in tokens:
+        if token == "--dry-run":
+            return True
+        if token.startswith("--dry-run="):
+            value = token.split("=", 1)[1].strip().lower()
+            if value not in ("false", "0", "no", "off", ""):
+                return True
+    return False
+
+
 def cautious_blocked(metadata: dict, args: str, confirm_cautious: bool) -> bool:
     if (metadata.get("safety") or "green") != "cautious":
         return False
-    if confirm_cautious:
+    if _as_bool(confirm_cautious):
         return False
-    return "--dry-run" not in (args or "")
+    return not _args_request_dry_run(args)
+
+
+def effective_args(metadata: dict, requested) -> str:
+    """Explicit args win; None *or* blank falls back to the saved default_args."""
+    if requested is None or str(requested).strip() == "":
+        return str(metadata.get("default_args", "")).strip()
+    return str(requested).strip()
 
 
 async def execute_run(script: str, payload: dict) -> dict:
@@ -812,11 +864,8 @@ async def execute_run(script: str, payload: dict) -> dict:
     if not (SCRIPT_DIR / script).is_file():
         raise HTTPException(status_code=404, detail="Script not found")
     metadata = get_script_metadata(script)
-    args = payload.get("args")
-    if args is None:
-        args = metadata.get("default_args", "")
-    args = str(args).strip()
-    wait = bool(payload.get("wait", True))
+    args = effective_args(metadata, payload.get("args"))
+    wait = _as_bool(payload.get("wait", True))
     try:
         timeout = max(1, int(payload.get("timeout") or 60))
     except (TypeError, ValueError):
@@ -930,8 +979,8 @@ async def api_v1_run_script(script: str, request: Request):
     if not (SCRIPT_DIR / script).is_file():
         raise HTTPException(status_code=404, detail="Script not found")
     args = payload.get("args")
-    effective_args = str(metadata.get("default_args", "")) if args is None else str(args)
-    if cautious_blocked(metadata, effective_args, bool(payload.get("confirm_cautious", False))):
+    run_args = effective_args(metadata, args)
+    if cautious_blocked(metadata, run_args, payload.get("confirm_cautious", False)):
         return JSONResponse(
             status_code=409,
             content={"error": "cautious_script", "message": CAUTIOUS_BLOCK_MESSAGE},
@@ -1043,6 +1092,7 @@ MCP_TOOLS = [
                 "schedule": {"type": "string"},
                 "expires_at": {"type": "string"},
                 "content": {"type": "string"},
+                "retired": {"type": "boolean"},
             },
             "required": ["script"],
         },
@@ -1089,8 +1139,8 @@ async def _mcp_call_tool(name: str, arguments: dict) -> dict:
         objects = list_script_objects(
             safety=arguments.get("safety", ""),
             tag=arguments.get("tag", ""),
-            scheduled=True if arguments.get("scheduled_only") else None,
-            include_retired=bool(arguments.get("include_retired", False)),
+            scheduled=True if _as_bool(arguments.get("scheduled_only")) else None,
+            include_retired=_as_bool(arguments.get("include_retired", False)),
             q=arguments.get("search", ""),
         )
         return _mcp_content({"count": len(objects), "scripts": objects})
@@ -1111,8 +1161,8 @@ async def _mcp_call_tool(name: str, arguments: dict) -> dict:
             return _mcp_content({"error": "script_not_found", "script": script}, is_error=True)
         metadata = get_script_metadata(script)
         args = arguments.get("args")
-        effective_args = str(metadata.get("default_args", "")) if args is None else str(args)
-        if cautious_blocked(metadata, effective_args, bool(arguments.get("confirm_cautious", False))):
+        run_args = effective_args(metadata, args)
+        if cautious_blocked(metadata, run_args, arguments.get("confirm_cautious", False)):
             return _mcp_content(
                 {"error": "cautious_script", "script": script, "message": CAUTIOUS_BLOCK_MESSAGE},
                 is_error=True,
@@ -1184,11 +1234,15 @@ async def _mcp_handle_message(message: dict):
     method = message.get("method", "")
     request_id = message.get("id")
     params = message.get("params") or {}
+    if not isinstance(params, dict):
+        return _mcp_error(request_id, -32602, "params must be an object")
     is_notification = "id" not in message
 
     if method == "initialize":
-        requested = params.get("protocolVersion", MCP_PROTOCOL_VERSIONS[-1])
-        protocol = requested if requested in MCP_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSIONS[-1]
+        requested = params.get("protocolVersion", MCP_PROTOCOL_VERSIONS[0])
+        # Fall back to the newest version we support when the client asks for
+        # something we don't know.
+        protocol = requested if requested in MCP_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSIONS[0]
         return {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -1394,7 +1448,14 @@ async def stop_script(script: str):
     pid = entry.get("pid")
     
     proc = _running_processes.get(script)
-    
+    was_running = bool(proc and proc.poll() is None) or entry.get("last_status") == "running"
+
+    # Lock in "stopped" *before* signalling, so the watcher_task that wakes on
+    # process exit sees it and does not overwrite it with "fail" (SIGTERM).
+    if was_running:
+        entry.update({"last_status": "stopped", "pid": None, "last_run": time.time()})
+        update_script_status(script, entry)
+
     # Primary method: Kill via direct memory reference
     if proc:
         try:
@@ -1415,7 +1476,7 @@ async def stop_script(script: str):
             _running_processes.pop(script, None)
             
     # Fallback method: OS signals if process isn't in memory
-    elif pid:
+    elif pid and was_running:
         try:
             import signal
             if hasattr(os, "killpg") and hasattr(os, "getpgid"):
@@ -1436,10 +1497,7 @@ async def stop_script(script: str):
         except Exception as e:
             print(f"Error stopping script via OS signal: {e}")
 
-    # Immediately lock in the stopped state
-    entry.update({"last_status": "stopped", "pid": None, "last_run": time.time()})
-    update_script_status(script, entry)
-    return JSONResponse({"success": True})
+    return JSONResponse({"success": True, "stopped": was_running})
 
 
 @app.post("/v2/api/script/{script}/delete", response_class=HTMLResponse)
